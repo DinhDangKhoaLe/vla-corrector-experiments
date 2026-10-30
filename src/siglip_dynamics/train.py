@@ -240,6 +240,8 @@ def train(cfg: TrainConfig) -> None:
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
+                cfg.image_token_grid_size = int(meta.get("image_token_grid_size", 0))
+                cfg.image_token_grid_shape = list(meta.get("image_token_grid_shape") or [])
                 data_action_dim = int(meta.get("action_dim", 0) or 0)
                 data_token_dim = int(meta.get("d_dim", 0) or 0)
                 if data_action_dim > 0 and cfg.model.action_dim != data_action_dim:

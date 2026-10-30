@@ -57,6 +57,9 @@ class TrainConfig:
     model: SiglipMLPConfig = field(default_factory=SiglipMLPConfig)
     model_type: ModelType = ModelType.MLP
     h_window: int = 1  # history frames for input, >=1
+    # Populated from cache metadata; serialized so online monitoring matches extraction.
+    image_token_grid_size: int = 0
+    image_token_grid_shape: list[int] = field(default_factory=list)
 
     batch_size: int = 2048
     epochs: int = 150

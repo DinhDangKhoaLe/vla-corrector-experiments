@@ -4,7 +4,6 @@ import argparse
 import inspect
 import json
 import logging
-import math
 import os
 import sys
 from pathlib import Path
@@ -13,6 +12,8 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from siglip_dynamics.visual_tokens import pool_square_token_grid
 
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset  # lerobot>=0.8
@@ -535,32 +536,7 @@ def _ensure_lerobot_importable() -> None:
 class BaseVisualExtractor:
     backend_name = "base"
 
-    @staticmethod
-    def _pool_square_token_grid(z: torch.Tensor, target_side: int) -> torch.Tensor:
-        """Average-pool a square patch-token grid while retaining feature dimension.
-
-        π0.5's image encoder produces a 16x16 grid (256 tokens).  Pooling is
-        deliberately explicit and opt-in because it changes the Corrector's
-        representation and must also be applied by a future online runtime.
-        """
-        if target_side <= 0:
-            return z
-        if z.ndim != 3:
-            raise ValueError(f"Expected visual tokens [B,L,D], got {tuple(z.shape)}")
-        source_side = math.isqrt(int(z.shape[1]))
-        if source_side * source_side != z.shape[1]:
-            raise ValueError(f"Cannot spatially pool non-square token count L={z.shape[1]}")
-        if target_side > source_side or source_side % target_side:
-            raise ValueError(
-                f"image-token-grid-size must divide source grid {source_side}; got {target_side}"
-            )
-        if target_side == source_side:
-            return z
-        batch, _tokens, dim = z.shape
-        grid = z.reshape(batch, source_side, source_side, dim).permute(0, 3, 1, 2)
-        kernel = source_side // target_side
-        pooled = F.avg_pool2d(grid, kernel_size=kernel, stride=kernel)
-        return pooled.permute(0, 2, 3, 1).reshape(batch, target_side * target_side, dim)
+    _pool_square_token_grid = staticmethod(pool_square_token_grid)
 
     def encode_item(
         self,
@@ -571,6 +547,7 @@ class BaseVisualExtractor:
         use_wrist_image: bool,
         extra_image_keys: tuple[str, ...] = (),
         image_token_grid_size: int = 0,
+        image_token_grid_shape: list[int] | tuple[int, int] | None = None,
     ) -> np.ndarray:
         imgs = [item[image_key]]
         if use_wrist_image and wrist_image_key and wrist_image_key in item:
@@ -579,7 +556,8 @@ class BaseVisualExtractor:
 
         feats: list[torch.Tensor] = []
         for raw_img in imgs:
-            feats.append(self._pool_square_token_grid(self.encode_single_image(raw_img), image_token_grid_size))
+            feats.append(self._pool_square_token_grid(
+                self.encode_single_image(raw_img), image_token_grid_size, target_shape=image_token_grid_shape))
         z = torch.cat(feats, dim=1)  # [1,L,D]
         return z[0].to(dtype=torch.float32).cpu().numpy()
 
@@ -949,6 +927,7 @@ def extract(args: argparse.Namespace) -> None:
         use_wrist_image=use_wrist_image,
         extra_image_keys=extra_image_keys,
         image_token_grid_size=args.image_token_grid_size,
+        image_token_grid_shape=args.image_token_grid_shape,
     )
     l_tokens, d_dim = int(z0.shape[0]), int(z0.shape[1])
     action_dim = int(_to_numpy(first[action_key]).shape[-1])
@@ -1006,6 +985,7 @@ def extract(args: argparse.Namespace) -> None:
             use_wrist_image=use_wrist_image,
             extra_image_keys=extra_image_keys,
             image_token_grid_size=args.image_token_grid_size,
+            image_token_grid_shape=args.image_token_grid_shape,
         )
         q, s = _quantize_per_token(z)
         z_q[i] = q
@@ -1067,6 +1047,7 @@ def extract(args: argparse.Namespace) -> None:
         "wrist_image_key": wrist_image_key,
         "extra_image_keys": list(extra_image_keys),
         "image_token_grid_size": int(args.image_token_grid_size),
+        "image_token_grid_shape": list(args.image_token_grid_shape or []),
         "action_key": resolved_action_key,
         "action_representation": action_representation,
         "action_delta_definition": action_delta_definition,
@@ -1127,6 +1108,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "0 keeps the exact encoder tokens; π0.5 has a 16x16 source grid. "
             "For three-camera RoboTwin, 4 makes the cache ~16x smaller than full tokens."
         ),
+    )
+    p.add_argument(
+        "--image-token-grid-shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"),
+        help="Per-camera rectangular mean pooling, e.g. 4 8 for 32 tokens. Keep --image-token-grid-size=0.",
     )
     p.add_argument(
         "--robotwin-action-normalization",

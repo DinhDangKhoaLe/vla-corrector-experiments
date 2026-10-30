@@ -1,0 +1,13 @@
+# Ordered action-prefix Corrector with an 8x8 grid (64 visual tokens).
+features:
+  action_prefix: true
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+training:
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  output: outputs/experiments/metaworld_prefix_pool64
+evaluation:
+  output: outputs/experiments/eval_metaworld_prefix_pool64
+  tasks: easy,medium,hard,very_hard
+  episodes: 20

@@ -1,0 +1,13 @@
+# Same prefix-only experiment, with a per-camera 4x4 mean-pooled grid.
+features:
+  action_prefix: true
+model:
+  image_token_grid_size: 4
+  horizons: [10]
+training:
+  cache: outputs/metaworld_mt50_pi05_latents_pool4
+  output: outputs/experiments/metaworld_prefix_pool4
+evaluation:
+  output: outputs/experiments/eval_metaworld_prefix_pool4
+  tasks: easy,medium,hard,very_hard
+  episodes: 20

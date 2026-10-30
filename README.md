@@ -59,7 +59,8 @@ Approximate storage requirements:
 ```text
 MetaWorld MT50 dataset:        45.9 GB
 Fine-tuned PI0.5 checkpoint:   16.6 GB
-Extracted latent cache:       ~108 GB in this setup
+Full-token latent cache:      ~107.5 GB
+64-token mean-pooled cache:   ~26.87 GB (optional workflow in section 6)
 ```
 
 ### Make the local PI0.5 compatibility view
@@ -77,7 +78,11 @@ python scripts/make_pi05_compat.py \
 
 ## 3. Extract frozen PI0.5 visual latents
 
-Run this once. All three Corrector variants below use the same output cache.
+This is the original full-token workflow. All three Corrector variants in
+section 4 use the same output cache below. If you want **only the 64-token
+mean-pooling experiments**, skip sections 3–4 and follow section 6 after the
+installation and downloads in sections 1–2; the full-token cache is not needed
+for those three pooled Correctors.
 
 ```bash
 python -m siglip_dynamics.extract \
@@ -347,7 +352,192 @@ checkpoint and monitor settings recorded in their YAML files. The uncertainty
 variant additionally requires the successful `collect-calibration` and
 `calibrate` steps before evaluation.
 
-## 6. What must not be committed to Git
+## 6. Spatial mean-pooling: extract, train and evaluate all Corrector modes
+
+The original, prefix and uncertainty Correctors each have an additional pooled
+variant. The `pool64` configs use a per-camera **`8×8` grid** to reduce the cached
+latent from `256×2048` to **`64×2048`** (about **26.87 GB** for MT50). The earlier
+`pool32` (32-token), `pool4` (16-token) and full-token configurations remain
+available. The online monitor and OGG use the same pooled representation as
+training; PI0.5 itself keeps its full visual tokens.
+
+The commands below run **Original Corrector, Prefix Corrector and Uncertainty
+Corrector** with the same pooled representation. Complete installation and
+downloads in sections 1–2 first. Plain PI0.5 and PACE use the commands in
+section 5; this pooling option applies to the Corrector representation.
+
+### A. Activate the environment
+
+Run from the repository root:
+
+```bash
+conda activate lerobot-dynamicVLA
+
+export HF_HOME="$PWD/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export EGL_PLATFORM=surfaceless
+export WANDB_MODE=disabled
+export WANDB_SILENT=true
+```
+
+### B. Extract the shared 64-token cache once
+
+This averages each `2×2` patch block of the original `16×16` grid, producing
+an `8×8` grid: **64×2048 features per frame** for single-camera MetaWorld.
+The estimated quantized cache for 204,806 frames is **26.87 GB (25.03 GiB)**,
+including scales, actions and episode indices. Dataset downloads, weights and
+evaluation videos take additional space.
+
+Use the new output path below; extraction writes its cache arrays. Set
+`--image-token-grid-size 8` for this square grid; omit the rectangular
+`--image-token-grid-shape` option.
+
+```bash
+python -m siglip_dynamics.extract \
+  --dataset-path ./datasets/metaworld_mt50 \
+  --dataset-repo-id lerobot/metaworld_mt50 \
+  --dataset-loader parquet \
+  --dataset-format metaworld \
+  --image-key observation.image \
+  --no-use-wrist-image \
+  --action-key action \
+  --output-path ./outputs/metaworld_mt50_pi05_latents_pool64 \
+  --encoder-backend pi05 \
+  --encoder-policy-path ./pretrained_weights/pi05_metaworld_compat \
+  --encoder-local-files-only \
+  --use-normalized-delta-action \
+  --image-token-grid-size 8 \
+  --max-output-gb 32 \
+  --device cuda
+```
+
+All three YAML files below use this cache and set
+`model.image_token_grid_size: 8`. Online observations and OGG conditioning
+are pooled to the same shape as the training data. Pooling reduces token
+storage and token-wise computation; it does not reduce the MLP parameter count
+or the policy backbone's visual-token count. Accuracy must be measured with
+the evaluations below.
+
+### C. Train the pooled Original Corrector
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_original_pool64.yaml \
+  --mode train
+```
+
+This retains the legacy current-action model, cosine loss and training split.
+Checkpoint:
+
+```text
+outputs/experiments/metaworld_original_pool64/h1_k10/best_cosine_model.pt
+```
+
+### D. Train the pooled Prefix Corrector
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_prefix_pool64.yaml \
+  --mode train
+```
+
+Checkpoint:
+
+```text
+outputs/experiments/metaworld_prefix_pool64/best_model.pt
+```
+
+### E. Train the pooled Uncertainty Corrector
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_uncertainty_pool64.yaml \
+  --mode train
+```
+
+Checkpoint:
+
+```text
+outputs/experiments/metaworld_uncertainty_pool64/best_model.pt
+```
+
+All three modes keep `h=1`, `K=10`, execution cap `E=10` and predicted chunk
+size 50, together with each mode's existing training settings. Run each command
+after its preceding step completes successfully. Each mode has its own output
+directory and does not overwrite full-token checkpoints.
+
+### F. Collect and calibrate the pooled Uncertainty Corrector
+
+Only the uncertainty mode needs these two steps. Pooling changes the residual
+distribution, so collect new calibration traces for this checkpoint instead of
+reusing full-token, 32-token or 16-token thresholds.
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_uncertainty_pool64.yaml \
+  --mode collect-calibration \
+  --set evaluation.episodes=10 \
+  --set evaluation.save_video=false
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_uncertainty_pool64.yaml \
+  --mode calibrate
+```
+
+This collects ten episodes **per task** across MT50, using collection seed
+10000. Calibration requires at least 50 successful episodes. The trace and
+calibration artifact use their own `pool64` paths in the uncertainty YAML.
+
+### G. Evaluate all three pooled modes on all tasks
+
+Each command evaluates `easy,medium,hard,very_hard`, with **20 episodes per
+task**, seed **1000**, and at most **300 environment steps per episode**.
+Raw rollout videos and CSV/JSON summaries are enabled. Original and Prefix
+evaluation can run after their training; Uncertainty evaluation must follow
+successful collection and calibration.
+
+```bash
+# Original Corrector: legacy MAD/EWMA alarm and OGG recovery.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_original_pool64.yaml \
+  --mode evaluate
+
+# Prefix Corrector: ordered action-prefix conditioning.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_prefix_pool64.yaml \
+  --mode evaluate
+
+# Uncertainty Corrector: calibrated expected-RMSE alarm and gated OGG.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_uncertainty_pool64.yaml \
+  --mode evaluate
+```
+
+Results and videos are stored under separate directories:
+
+```text
+outputs/experiments/eval_metaworld_original_pool64/
+outputs/experiments/eval_metaworld_prefix_pool64/
+outputs/experiments/eval_metaworld_uncertainty_pool64/
+```
+
+For a repeat evaluation, choose a fresh output directory, for example:
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_prefix_pool64.yaml \
+  --mode evaluate \
+  --set evaluation.output=outputs/experiments/eval_metaworld_prefix_pool64_repeat
+```
+
+The existing full-token commands remain in sections 3–5. The earlier 16-/32-token
+commands and additional representation details are in
+[the spatial-pooling ablation guide](docs/metaworld_spatial_pool_ablation.md).
+
+## 7. What must not be committed to Git
 
 Do not commit these local artifacts:
 

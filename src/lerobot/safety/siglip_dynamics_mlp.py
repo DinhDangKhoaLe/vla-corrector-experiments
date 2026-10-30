@@ -461,6 +461,8 @@ class SiglipDynamicsPredictor:
         self.checkpoint_path = _pick_checkpoint(self.model_dir)
         self.device = torch.device(device)
         self.model_type = "mlp"
+        image_token_grid_size = 0
+        image_token_grid_shape = []
 
         config_path = self.model_dir / "config.json"
         run_config_path = self.model_dir / "run_config.json"
@@ -469,6 +471,8 @@ class SiglipDynamicsPredictor:
                 cfg_json = json.load(f)
 
             model_cfg_json = cfg_json.get("model", {})
+            image_token_grid_size = int(cfg_json.get("image_token_grid_size", 0))
+            image_token_grid_shape = list(cfg_json.get("image_token_grid_shape") or [])
             custom_widths = tuple(int(x) for x in model_cfg_json.get("custom_widths", [2048, 2048, 2048, 2048]))
             self.model_cfg = SafetyMLPConfig(
                 token_dim=int(model_cfg_json["token_dim"]),
@@ -490,6 +494,8 @@ class SiglipDynamicsPredictor:
                 run_cfg = json.load(f)
 
             args_json = run_cfg.get("args", {})
+            image_token_grid_size = int(run_cfg.get("image_token_grid_size", 0))
+            image_token_grid_shape = list(run_cfg.get("image_token_grid_shape") or [])
             self.model_type = str(run_cfg.get("model_type", args_json.get("model_type", "mlp"))).lower()
             self.model_cfg = SafetyMLPConfig(
                 token_dim=int(run_cfg["token_dim"]),
@@ -513,6 +519,8 @@ class SiglipDynamicsPredictor:
             state_dict = obj["state_dict"]
             train_cfg = obj.get("train_cfg", {})
             if isinstance(train_cfg, dict):
+                image_token_grid_size = int(train_cfg.get("image_token_grid_size", image_token_grid_size))
+                image_token_grid_shape = list(train_cfg.get("image_token_grid_shape", image_token_grid_shape) or [])
                 self.h_window = int(train_cfg.get("h_window", self.h_window))
                 self.k_step = int(train_cfg.get("k_step", self.k_step))
             self.h_window = int(obj.get("h_window", self.h_window))
@@ -554,6 +562,9 @@ class SiglipDynamicsPredictor:
         else:
             raise ValueError(f"Unsupported safety model_type={self.model_type}")
         self.model.load_state_dict(state_dict, strict=True)
+        # Plain Python attribute, with no new parameters or state-dict keys.
+        self.model.image_token_grid_size = image_token_grid_size
+        self.model.image_token_grid_shape = image_token_grid_shape
         self.model.eval()
 
     @property

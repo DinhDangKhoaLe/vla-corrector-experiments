@@ -1,0 +1,23 @@
+# Spatial-mean ablation only. Same legacy trainer/MAD/OGG as the original.
+# Separate cache, checkpoints and results; no changes to existing runs.
+features:
+  action_prefix: false
+model:
+  image_token_grid_size: 4
+  horizons: [10]
+training:
+  backend: legacy
+  cache: outputs/metaworld_mt50_pi05_latents_pool4
+  output: outputs/experiments/metaworld_original_pool4
+evaluation:
+  checkpoint: ''  # Resolves to this run's training.output/h1_k10.
+  output: outputs/experiments/eval_metaworld_original_pool4
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: true
+  guidance_eta: 1.0
+  cooldown_steps: 10
+  save_video: true

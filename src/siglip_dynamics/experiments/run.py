@@ -13,6 +13,7 @@ import sys
 import yaml
 
 from .config import from_dict, load_config
+from siglip_dynamics.visual_tokens import validate_cache_grid, validate_checkpoint_grid
 
 
 MODES = ("train", "collect-calibration", "calibrate", "evaluate")
@@ -134,6 +135,9 @@ def main():
         return
     if args.mode == "train":
         if cfg.training.backend == "legacy":
+            with open(Path(cfg.training.cache) / "metadata.json", encoding="utf-8") as f:
+                validate_cache_grid(json.load(f), cfg.model.image_token_grid_size,
+                                    target_shape=cfg.model.image_token_grid_shape)
             output = Path(cfg.training.output)
             if output.exists() and any(output.iterdir()):
                 raise FileExistsError(f"Refusing to overwrite an existing/running baseline in {output}")
@@ -152,6 +156,11 @@ def main():
             evaluate_robotwin(cfg, mode=mode, config_path=Path(args.config))
             return
         suffix = "_calibration" if args.mode == "collect-calibration" else ""
+        if cfg.model.image_token_grid_size or cfg.model.image_token_grid_shape:
+            default_checkpoint = "h1_k10" if cfg.training.backend == "legacy" else "best_model.pt"
+            checkpoint = cfg.evaluation.checkpoint or str(Path(cfg.training.output) / default_checkpoint)
+            validate_checkpoint_grid(checkpoint, cfg.model.image_token_grid_size,
+                                     target_shape=cfg.model.image_token_grid_shape)
         output = Path(cfg.evaluation.output + suffix)
         if output.exists() and any(output.iterdir()):
             raise FileExistsError(f"Use a fresh evaluation.output; {output} is not empty")

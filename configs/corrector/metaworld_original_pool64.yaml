@@ -1,0 +1,22 @@
+# 8x8 spatial mean-pooling ablation: 64 visual tokens per camera.
+features:
+  action_prefix: false
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+training:
+  backend: legacy
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  output: outputs/experiments/metaworld_original_pool64
+evaluation:
+  checkpoint: ''
+  output: outputs/experiments/eval_metaworld_original_pool64
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: true
+  guidance_eta: 1.0
+  cooldown_steps: 10
+  save_video: true

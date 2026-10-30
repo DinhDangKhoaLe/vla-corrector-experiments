@@ -14,6 +14,8 @@ from .config import Experiment
 class ExperimentalCorrector(nn.Module):
     def __init__(self, cfg: Experiment, token_dim: int, action_dim: int):
         super().__init__()
+        self.image_token_grid_size = cfg.model.image_token_grid_size
+        self.image_token_grid_shape = cfg.model.image_token_grid_shape
         self.uses_action_prefix = cfg.features.action_prefix
         self.horizons = tuple(cfg.model.horizons)
         self.max_horizon = max(self.horizons)

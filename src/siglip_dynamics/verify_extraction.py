@@ -138,6 +138,7 @@ def verify(args: argparse.Namespace) -> None:
             use_wrist_image=use_wrist,
             extra_image_keys=extra_image_keys,
             image_token_grid_size=image_token_grid_size,
+            image_token_grid_shape=meta.get("image_token_grid_shape"),
         )
         z_cache = _dequantize(z_q[idx], z_scale[idx])
         cos = _cosine_similarity(z_ref, z_cache)

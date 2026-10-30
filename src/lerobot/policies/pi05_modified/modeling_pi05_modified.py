@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Pytorch, make_att_2d_masks
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
+from siglip_dynamics.visual_tokens import pool_square_token_grid
 
 from .configuration_pi05_modified import PI05ModifiedConfig
 
@@ -367,6 +368,10 @@ class PI05ModifiedPolicy(PI05Policy):
     @torch.no_grad()
     def encode_siglip_only(self, batch: dict[str, Tensor]) -> np.ndarray:
         images, img_masks = self._preprocess_images(batch)
+        # The loaded Corrector carries its training representation. Leave the
+        # policy's own full-resolution vision/LLM/action-expert path unchanged.
+        grid_size = getattr(self.model.safety_predictor, "image_token_grid_size", 0)
+        grid_shape = getattr(self.model.safety_predictor, "image_token_grid_shape", None)
         token_blocks = []
         for image, mask in zip(images, img_masks, strict=False):
             use_block = True
@@ -374,10 +379,12 @@ class PI05ModifiedPolicy(PI05Policy):
                 use_block = bool(mask[0].item())
             if not use_block:
                 continue
-            token_blocks.append(self.model.paligemma_with_expert.embed_image(image))
+            token_blocks.append(pool_square_token_grid(
+                self.model.paligemma_with_expert.embed_image(image), grid_size, target_shape=grid_shape))
 
         if not token_blocks:
-            token_blocks.append(self.model.paligemma_with_expert.embed_image(images[0]))
+            token_blocks.append(pool_square_token_grid(
+                self.model.paligemma_with_expert.embed_image(images[0]), grid_size, target_shape=grid_shape))
 
         z_t = torch.cat(token_blocks, dim=1)[0].detach().to("cpu", dtype=torch.float32).numpy()
         return np.asarray(z_t, dtype=np.float32)

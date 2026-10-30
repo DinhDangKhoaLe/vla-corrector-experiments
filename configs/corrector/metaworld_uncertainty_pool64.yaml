@@ -1,0 +1,43 @@
+# Prefix + expected-RMSE monitor with an 8x8 grid (64 visual tokens).
+features:
+  action_prefix: true
+  uncertainty_monitor: true
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+  uncertainty_hidden: 128
+training:
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  output: outputs/experiments/metaworld_uncertainty_pool64
+  epochs: 30
+  batch_size: 512
+  microbatch_size: 64
+  patience: 5
+  cosine_loss_weight: 1.0
+  mse_loss_weight: 1.0
+  uncertainty_loss_weight: 0.1
+uncertainty:
+  rmse_floor: 0.0001
+  episode_quantile: 0.95
+  min_successful_episodes: 50
+  persistence_checks: 2
+  reset_checks: 2
+  release_ratio: 0.8
+  direction_coherence_min: 0.5
+  ogg_enabled: true
+  ogg_uncertainty_quantile: 0.75
+  min_error_correlation: 0.1
+  traces: outputs/experiments/eval_metaworld_uncertainty_pool64_calibration/experiment_episodes.jsonl
+  artifact: outputs/experiments/metaworld_uncertainty_pool64_calibration.json
+evaluation:
+  output: outputs/experiments/eval_metaworld_uncertainty_pool64
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  collection_seed: 10000
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: true
+  guidance_eta: 1.0
+  cooldown_steps: 10
+  save_video: true

@@ -17,6 +17,8 @@ class Features:
 
 @dataclass
 class Model:
+    image_token_grid_size: int = 0  # 0: original tokens; 4: per-camera 4x4 mean-pooled grid.
+    image_token_grid_shape: list[int] = field(default_factory=list)  # e.g. [4, 8] for 32 tokens.
     horizons: list[int] = field(default_factory=lambda: [10])
     widths: list[int] = field(default_factory=lambda: [2048] * 4)
     action_embed_dim: int = 256
@@ -98,6 +100,14 @@ class Experiment:
     uncertainty: Uncertainty = field(default_factory=Uncertainty)
 
     def validate(self):
+        if type(self.model.image_token_grid_size) is not int or self.model.image_token_grid_size not in (0, 1, 2, 4, 8, 16):
+            raise ValueError("model.image_token_grid_size must be 0, 1, 2, 4, 8 or 16 for PI0.5")
+        shape = self.model.image_token_grid_shape
+        if not isinstance(shape, list) or (shape and (
+                len(shape) != 2 or any(type(v) is not int or v not in (1, 2, 4, 8, 16) for v in shape))):
+            raise ValueError("model.image_token_grid_shape must be [] or [rows, columns] dividing 16")
+        if shape and self.model.image_token_grid_size:
+            raise ValueError("Set either model.image_token_grid_size or model.image_token_grid_shape")
         h = self.model.horizons
         if not h or h != sorted(set(h)) or any(type(x) is not int or x < 1 for x in h):
             raise ValueError("model.horizons must be sorted, unique positive integers")

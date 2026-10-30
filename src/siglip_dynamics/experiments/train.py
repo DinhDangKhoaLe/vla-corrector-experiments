@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .config import Experiment
+from siglip_dynamics.visual_tokens import validate_cache_grid
 from .data import PrefixDataset, episode_split
 from .model import ExperimentalCorrector
 
@@ -50,6 +51,7 @@ def train_experiment(cfg: Experiment):
     root = Path(tr.cache)
     with open(root / "metadata.json", encoding="utf-8") as f:
         metadata = json.load(f)
+    validate_cache_grid(metadata, cfg.model.image_token_grid_size, target_shape=cfg.model.image_token_grid_shape)
     if metadata.get("action_representation") != "normalized_action":
         raise ValueError("Re-extract with --use-normalized-delta-action; experiments require policy-normalized actions")
     ids = np.load(root / "episode_index.npy", mmap_mode="r")
