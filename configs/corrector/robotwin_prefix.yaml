@@ -1,0 +1,21 @@
+# Three-camera, 14-D dual-arm RoboTwin corrector training.
+# This is offline training only. The MetaWorld evaluator must not be used with it.
+features:
+  action_prefix: true
+model:
+  horizons: [10]
+training:
+  # 8x8 pooled tokens per camera (192 total), extracted only for the 15
+  # lowest-scoring π0.5 Clean-to-Clean RoboTwin tasks.
+  cache: outputs/robotwin_pi05_hard15_latents_3cam_grid8
+  output: outputs/experiments/robotwin_hard15_prefix
+  epochs: 30
+  batch_size: 128
+  microbatch_size: 16
+  patience: 5
+evaluation:
+  # Reserved for the future RoboTwin/SAPIEN runtime adapter; unused by --mode train.
+  policy: pretrained_weights/robotwin_pi05
+  output: outputs/experiments/eval_robotwin_prefix
+  n_action_steps: 10
+  chunk_size: 50

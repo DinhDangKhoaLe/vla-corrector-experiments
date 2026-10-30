@@ -1,0 +1,36 @@
+# EXACT legacy code path: original trainer, sample-level random split, original
+# rolling k=10 MAD monitor and OGG. No experimental model/monitor is loaded.
+# Evaluate the existing training job; optional retraining writes a separate folder.
+features:
+  action_prefix: false
+model:
+  horizons: [10]
+  widths: [2048, 2048, 2048, 2048]
+  action_embed_dim: 256
+  dropout: 0.0
+training:
+  backend: legacy
+  cache: outputs/metaworld_mt50_pi05_latents_tf54_fixed
+  output: outputs/experiments/baseline_legacy
+  device: cuda
+  batch_size: 512
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_compat
+  checkpoint: outputs/metaworld_mt50_pi05_corrector_tf54_fixed/h1_k10
+  output: outputs/experiments/eval_baseline
+  tasks: button-press-v3
+  episodes: 5
+  seed: 1000
+  collection_seed: 2000
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: true
+  guidance_eta: 1.0
+  save_video: true

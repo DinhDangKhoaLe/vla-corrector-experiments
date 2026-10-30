@@ -1,0 +1,21 @@
+# PACE-style, training-free execution calibration for PI0.5 MetaWorld.
+# It reads demonstrations only.  No Corrector model is trained or loaded.
+dataset:
+  cache: outputs/metaworld_mt50_pi05_latents_tf54_fixed
+  source: datasets/metaworld_mt50
+
+calibration:
+  artifact: outputs/pace/metaworld_pi05_joint_smooth.json
+  # 0 uses every available action window. Set a positive value only for a quick smoke run.
+  max_windows_per_task: 0
+
+pace:
+  # PI0.5 predicts a 50-action chunk in this setup.
+  max_horizon: 50
+  # MetaWorld XYZ arm motion; deliberately omit the gripper action.
+  motion_dims: [0, 1, 2]
+  smooth_window: 5
+  prominence_window: 10
+  min_separation: 10
+  # PACE paper's reported default calibration percentile.
+  percentile: 5.0

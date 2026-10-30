@@ -1,0 +1,10 @@
+# Research control, NOT the exact historic training recipe: original architecture
+# and monitoring but episode-disjoint training splits matching prefix/full.
+features:
+  action_prefix: false
+training:
+  backend: experimental
+  output: outputs/experiments/baseline_matched
+evaluation:
+  output: outputs/experiments/eval_baseline_matched
+  guidance: true

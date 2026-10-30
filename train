@@ -1,0 +1,206 @@
+torchrun --nproc_per_node=1 -m siglip_dynamics.train \
+  --dataset-path ./outputs/metaworld_mt50_pi05_latents_tf54_fixed \
+  --checkpoint-dir ./outputs/metaworld_mt50_pi05_corrector_tf54_fixed \
+  --device cuda \
+  --model-type mlp \
+  --scale 20m \
+  --token-dim 2048 \
+  --action-dim 4 \
+  --action-embed-dim 256 \
+  --dropout 0.0 \
+  --h-window 1 \
+  --k-step-list 10 \
+  --batch-size 512 \
+  --epochs 30 \
+  --lr 3e-4 \
+  --weight-decay 1e-4 \
+  --val-ratio 0.1 \
+  --seed 42 \
+  --grad-clip-norm 1.0 \
+  --patience 5 \
+  --train-loss-type cosine
+
+
+
+conda activate lerobot-dynamicVLA
+export HF_HOME="$PWD/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export EGL_PLATFORM=surfaceless
+
+# ---------------------------------------------------------------------------
+# 1. ORDERED ACTION-PREFIX ONLY
+# It sees exactly actions [a_t, ..., a_(t+9)] for the predicted z_(t+10)-z_t.
+# ---------------------------------------------------------------------------
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/prefix.yaml \
+  --mode train
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/prefix.yaml \
+  --mode evaluate
+
+# ---------------------------------------------------------------------------
+# 2. FIXED-K UNCERTAINTY CORRECTOR
+# K=10; E cap=10; cosine + MSE + detached log-RMSE-head loss.
+# No adaptive-E selector. Existing prefix/baseline commands above are unchanged.
+# ---------------------------------------------------------------------------
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode train
+
+# Shadow calibration: 5 episodes x 50 tasks, independent seed=10000.
+# This runs plain pi0.5 with monitoring logged, without alarm interventions.
+# Videos off only for collection; final evaluation saves every raw episode video.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode collect-calibration \
+  --set evaluation.episodes=5 \
+  --set evaluation.save_video=false
+
+# At least 50 successful calibration episodes required. This is empirical
+# episode-maximum calibration. If error-head
+# validation is weak, evaluation falls back to ordinary replans instead of OGG.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode calibrate
+
+# All 50 tasks x 20 episodes; seed=1000. Saves videos, summaries and score traces.
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode evaluate
+
+# Optional normal-replan-only ablation: reuse this calibration, disable OGG.
+# python -m siglip_dynamics.experiments.run \
+#   --config configs/corrector/uncertainty.yaml --mode evaluate \
+#   --set uncertainty.ogg_enabled=false \
+#   --set evaluation.output=outputs/experiments/eval_uncertainty_no_ogg
+
+# Optional repeat of the matched E=10 prefix-only comparison (no retraining/calibration).
+# python -m siglip_dynamics.experiments.run \
+#   --config configs/corrector/prefix.yaml --mode evaluate \
+#   --set evaluation.output=outputs/experiments/eval_prefix_e10_repeat
+
+# Previous checkpoints, logs and result folders have not been removed.
+
+
+cd ~/Public/Augustine/vla-corrector
+conda activate lerobot-dynamicVLA
+
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export EGL_PLATFORM=surfaceless
+
+export HF_HOME="$PWD/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+
+python -m lerobot.scripts.lerobot_eval_modified_detection \
+  --policy.path=./pretrained_weights/pi05_metaworld_compat \
+  --policy.device=cuda \
+  --policy.n_action_steps=50 \
+  --policy.chunk_size=50 \
+  --policy.compile_model=false \
+  --env.type=metaworld \
+  --env.task='easy,medium,hard,very_hard' \
+  --env.episode_length=300 \
+  --env.max_parallel_tasks=1 \
+  --eval.batch_size=1 \
+  --eval.n_episodes=20 \
+  --eval.use_async_envs=false \
+  --seed=1000 \
+  --rename_map='{"observation.image":"observation.images.base_0_rgb"}' \
+  --pace_config=configs/pace/metaworld_pi05.yaml \
+  --pace_disable_corrector=true \
+  --guidance_eta=0 \
+  --guidance_compare_baseline=false \
+  --meltdown_use_guidance_replan=false \
+  --compute_baseline_metrics=false \
+  --output_dir=./outputs/eval/metaworld_mt50_pi05_pace_all_tasks_fixed \
+  --video_fps=10 \
+  --save_analysis=true \
+  --save_raw_video=true \
+  --save_sync_video_with_curve=false \
+  --save_baseline_sync_video_with_curve=false \
+  --save_guidance_dual_video=false \
+  --save_et_curve_plot=false \
+  --save_baseline_et_curve_plot=false \
+  --save_episode_step_csv=false \
+  --save_baseline_step_csv=false \
+  --save_guidance_event_csv=false \
+  --save_episode_npz=true \
+  --save_task_plots=true \
+  --save_summary_csv=true \
+  --save_summary_json=true \
+  --max_visualizations_per_task=0 \
+  --max_visualizations_total=0
+
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode train
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode collect-calibration \
+  --set evaluation.episodes=10 \
+  --set evaluation.save_video=false
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode calibrate
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/uncertainty.yaml \
+  --mode evaluate
+
+
+
+cd ~/Public/Augustine/vla-corrector
+conda activate lerobot-dynamicVLA
+
+export ROBOTWIN_ROOT="$PWD/third_party/RoboTwin"
+export HF_HOME="$PWD/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+
+python -m siglip_dynamics.extract \
+  --dataset-path ./third_party/RoboTwin/data/demo_clean \
+  --dataset-format robotwin \
+  --robotwin-tasks hanging_mug,move_stapler_pad,handover_block,click_bell,place_cans_plasticbox,place_mouse_pad,put_object_cabinet,blocks_ranking_size,move_pillbottle_pad,scan_object,turn_switch,stamp_seal,place_can_basket,move_can_pot,place_bread_basket \
+  --action-key actions \
+  --output-path ./outputs/robotwin_pi05_hard15_latents_3cam_original \
+  --encoder-backend pi05 \
+  --encoder-policy-path ./pretrained_weights/robotwin_pi05_vanilla_compat \
+  --encoder-local-files-only \
+  --use-normalized-delta-action \
+  --robotwin-action-normalization policy_quantile \
+  --image-token-grid-size 0 \
+  --max-output-gb 260 \
+  --device cuda
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_original.yaml \
+  --mode train
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_uncertainty.yaml \
+  --mode train
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_uncertainty.yaml \
+  --mode collect-calibration
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_uncertainty.yaml \
+  --mode calibrate
+
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_original.yaml \
+  --mode evaluate
+
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/robotwin_uncertainty.yaml \
+  --mode evaluate

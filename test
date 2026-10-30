@@ -1,0 +1,16 @@
+4. I found several inexpensive improvements missing from the proposal.
+These should precede a larger architecture.
+- Split by episode. The standard [training script (line 280)](/home/student/Public/Augustine/vla-corrector/src/siglip_dynamics/train.py:280) randomly splits overlapping trajectory samples. Nearby samples—and even shared frames—can appear in both training and validation, making validation optimistic. Use disjoint episodes for training, model selection, calibration, and testing. The existing train_split_sweep.py already contains episode-splitting utilities. This also qualifies my earlier “paper-matched” command: it follows the public trainer, but does not establish independent episode-level validation.
+- Handle tiny visual changes deterministically. The evaluator currently adds random noise when the observed latent change is nearly zero. See [the error calculation (line 1201)](/home/student/Public/Augustine/vla-corrector/src/lerobot/scripts/lerobot_eval_modified_detection.py:1201). This can make stationary scenes produce unstable angular errors. Use an explicit low-motion case and a residual-magnitude check instead.
+- Test magnitude as well as direction. Cosine error cannot distinguish Δz from 10 × Δz. Test a calibrated combination of direction error and magnitude error, particularly for stalls and overshooting. Compare it against cosine alone before adopting it.
+- Remove the initial monitoring blind period. The [threshold implementation (line 531)](/home/student/Public/Augustine/vla-corrector/src/lerobot/scripts/lerobot_eval_modified_detection.py:531) suppresses alarms while collecting bootstrap scores. With k=10 and 15 bootstrap observations, roughly the first two dozen steps cannot trigger this detector. An offline-calibrated initial threshold could provide monitoring earlier.
+- Check short-horizon quantization error. Extracted latents use int8 quantization. At one-step horizons, genuine changes may be small relative to quantization error. Compare FP16 and int8 targets on a small subset before concluding that a one-step predictor is ineffective.
+These are code-based findings and proposed fixes; I have not measured their effect on success rate.
+
+
+
+Proposed improvement	My assessment	What I would change
+Multiple prediction horizons	Promising	Share model weights; keep k=10 for comparison with the original.
+Stronger OGG for severe risk	Not justified as written	Large errors can mean the corrector is unreliable. Stronger gradients could worsen recovery.
+Optional semantic progress monitor	Useful later	Run infrequently and reuse cached features; avoid another large model on every control step.
+

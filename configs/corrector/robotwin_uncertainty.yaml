@@ -1,0 +1,43 @@
+# Three-camera, 14-D dual-arm RoboTwin uncertainty-corrector.
+features:
+  # Match MetaWorld uncertainty: ordered queued actions a_t...a_{t+9}.
+  action_prefix: true
+  uncertainty_monitor: true
+model:
+  horizons: [10]
+  uncertainty_hidden: 128
+training:
+  # Must match the exact, unpooled 15-task three-camera extraction.
+  cache: outputs/robotwin_pi05_hard15_latents_3cam_original
+  output: outputs/experiments/robotwin_hard15_uncertainty
+  epochs: 30
+  batch_size: 128
+  microbatch_size: 16
+  patience: 5
+  cosine_loss_weight: 1.0
+  mse_loss_weight: 1.0
+  uncertainty_loss_weight: 0.1
+uncertainty:
+  rmse_floor: 0.0001
+  episode_quantile: 0.95
+  min_successful_episodes: 50
+  persistence_checks: 2
+  reset_checks: 2
+  release_ratio: 0.8
+  direction_coherence_min: 0.5
+  # Match the MetaWorld uncertainty method: use OGG only after its error
+  # head passes calibration validation and residual direction is coherent.
+  ogg_enabled: true
+  ogg_uncertainty_quantile: 0.75
+  min_error_correlation: 0.1
+  traces: outputs/experiments/eval_robotwin_uncertainty_calibration/experiment_episodes.jsonl
+  artifact: outputs/experiments/robotwin_uncertainty_calibration.json
+evaluation:
+  policy: pretrained_weights/robotwin_pi05_vanilla_compat
+  output: outputs/experiments/eval_robotwin_uncertainty
+  robotwin_root: third_party/RoboTwin
+  robotwin_task_config: demo_clean
+  robotwin_tasks: hanging_mug,move_stapler_pad,handover_block,click_bell,place_cans_plasticbox,place_mouse_pad,put_object_cabinet,blocks_ranking_size,move_pillbottle_pad,scan_object,turn_switch,stamp_seal,place_can_basket,move_can_pot,place_bread_basket
+  robotwin_expert_check: true
+  n_action_steps: 10
+  chunk_size: 50

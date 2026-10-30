@@ -1,0 +1,11 @@
+# First ablation: compare with baseline_matched + baseline_queue_matched controls.
+features:
+  action_prefix: true
+model:
+  horizons: [10]
+training:
+  output: outputs/experiments/prefix
+evaluation:
+  output: outputs/experiments/eval_prefix
+  tasks: easy,medium,hard,very_hard
+  episodes: 20

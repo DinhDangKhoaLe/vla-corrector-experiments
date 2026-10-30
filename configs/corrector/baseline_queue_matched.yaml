@@ -1,0 +1,10 @@
+# Train baseline_matched.yaml first. This control uses the SAME single-action checkpoint
+# but scores only transitions fully covered by the current execution queue.
+features:
+  action_prefix: false
+training:
+  output: outputs/experiments/baseline_matched
+evaluation:
+  output: outputs/experiments/eval_baseline_queue_matched
+  queue_bounded_monitor: true
+  guidance: true

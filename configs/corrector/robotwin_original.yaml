@@ -1,0 +1,33 @@
+# Paper-style VLA Corrector control: exactly one current action conditions a
+# fixed K=10 latent transition.  No action-prefix or uncertainty head.
+features:
+  action_prefix: false
+  uncertainty_monitor: false
+model:
+  horizons: [10]
+  widths: [2048, 2048, 2048, 2048]
+  action_embed_dim: 256
+  dropout: 0.0
+training:
+  backend: legacy
+  cache: outputs/robotwin_pi05_hard15_latents_3cam_original
+  output: outputs/robotwin_hard15_original_corrector
+  device: cuda
+  batch_size: 512
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+evaluation:
+  policy: pretrained_weights/robotwin_pi05_vanilla_compat
+  checkpoint: outputs/robotwin_hard15_original_corrector/h1_k10
+  output: outputs/eval/robotwin_hard15_original_corrector
+  episodes: 20
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: true
+  guidance_eta: 1.0
+  save_video: true
