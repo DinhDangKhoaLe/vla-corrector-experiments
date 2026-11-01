@@ -440,7 +440,12 @@ class PaliGemmaWithExpertModel(
         if image.dtype != torch.float32:
             image = image.to(torch.float32)
         image_outputs = self.paligemma.model.get_image_features(image)
-        features = image_outputs.pooler_output
+        # Transformers versions used by native OpenPI conversion may return the
+        # projected image tensor directly, while the Hugging Face implementation
+        # returns a model-output object exposing ``pooler_output``. Both contain
+        # the same [B, 256, 2048] PI0.5 visual-token representation.
+        features = (image_outputs.pooler_output
+                    if hasattr(image_outputs, "pooler_output") else image_outputs)
         if features.dtype != out_dtype:
             features = features.to(out_dtype)
         return features
