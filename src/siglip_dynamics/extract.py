@@ -215,6 +215,41 @@ def _filter_kwargs_by_signature(cls, kwargs: dict) -> dict:
     return {k: v for k, v in kwargs.items() if k in allowed}
 
 
+def _restrict_lerobot_video_decode(ds: object, args: argparse.Namespace, logger: logging.Logger) -> None:
+    """Avoid decoding camera streams that are not part of this latent cache.
+
+    LeRobot v3 stores videos out-of-band, but its default reader decodes every
+    stream declared in metadata for each ``__getitem__`` call. Extraction often
+    selects a strict subset (e.g. torso only); filtering the in-memory metadata
+    before the first sample keeps the dataset on disk untouched while preventing
+    needless video decode and host-to-device transfer.
+    """
+    meta = getattr(ds, "meta", None)
+    info = getattr(meta, "info", None)
+    if not isinstance(info, dict) or not isinstance(info.get("features"), dict):
+        return
+
+    requested = {str(getattr(args, "image_key", "")).strip()}
+    if bool(getattr(args, "use_wrist_image", False)):
+        requested.add(str(getattr(args, "wrist_image_key", "")).strip())
+    requested.update(key.strip() for key in str(getattr(args, "extra_image_keys", "")).split(","))
+    requested.discard("")
+
+    features = info["features"]
+    video_keys = [key for key, feature in features.items()
+                  if isinstance(feature, dict) and feature.get("dtype") == "video"]
+    selected = set(video_keys) & requested
+    # Do not filter when keys are auto-resolved later. This preserves existing
+    # automatic layout behavior for datasets whose image names are not supplied.
+    if not selected:
+        return
+
+    skipped = [key for key in video_keys if key not in selected]
+    for key in skipped:
+        features.pop(key)
+    logger.info("Restricting LeRobot video decode to %s; skipping %s", sorted(selected), skipped)
+
+
 class LocalParquetDataset:
     """Lightweight local parquet dataset adapter to avoid remote sync side effects."""
 
@@ -352,6 +387,7 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
             else:
                 ds = LeRobotDataset(**kw)
             logger.info("Dataset loaded via LeRobotDataset(%s)", kw)
+            _restrict_lerobot_video_decode(ds, args, logger)
             return ds, kw
         except Exception as e:  # noqa: BLE001
             errors.append(f"{kw} -> {type(e).__name__}: {e}")
