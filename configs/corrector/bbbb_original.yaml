@@ -1,0 +1,27 @@
+# Offline, paper-style VLA-Corrector for Kronze157/bbbb.
+# This is the original single-current-action formulation: z_t, a_t -> z_(t+10)-z_t.
+# It intentionally has no action-prefix and no uncertainty head.
+features:
+  action_prefix: false
+  uncertainty_monitor: false
+model:
+  # Torso camera only: an 8x8 token grid = 64 visual tokens per frame.
+  image_token_grid_size: 8
+  horizons: [10]
+  widths: [2048, 2048, 2048, 2048]
+  action_embed_dim: 256
+  dropout: 0.0
+training:
+  backend: legacy
+  cache: outputs/bbbb_pi05_latents_torso_grid8
+  output: outputs/bbbb_original_corrector_torso_grid8
+  device: cuda
+  batch_size: 512
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+

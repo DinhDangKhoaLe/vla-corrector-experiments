@@ -561,6 +561,45 @@ class BaseVisualExtractor:
         z = torch.cat(feats, dim=1)  # [1,L,D]
         return z[0].to(dtype=torch.float32).cpu().numpy()
 
+    def encode_items(
+        self,
+        items: list[dict],
+        *,
+        image_key: str,
+        wrist_image_key: str,
+        use_wrist_image: bool,
+        extra_image_keys: tuple[str, ...] = (),
+        image_token_grid_size: int = 0,
+        image_token_grid_shape: list[int] | tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        """Encode a homogeneous frame batch without changing token order.
+
+        Images are batched one camera at a time so every sample retains the
+        same camera-major token layout as :meth:`encode_item`. This lets the
+        GPU process many independent video frames in one vision-encoder call.
+        """
+        if not items:
+            raise ValueError("encode_items requires at least one dataset item")
+
+        keys = [image_key]
+        if use_wrist_image and wrist_image_key:
+            if any(wrist_image_key not in item for item in items):
+                raise KeyError(f"wrist_image_key='{wrist_image_key}' is missing from a batched item")
+            keys.append(wrist_image_key)
+        if any(any(key not in item for key in extra_image_keys) for item in items):
+            raise KeyError(f"An extra image key is missing from a batched item: {extra_image_keys}")
+        keys.extend(extra_image_keys)
+
+        feats: list[torch.Tensor] = []
+        for key in keys:
+            # _to_numpy accepts decoded torch, PIL, and ndarray image values.
+            # np.stack preserves either BHWC or BCHW, both accepted downstream.
+            image_batch = np.stack([_to_numpy(item[key]) for item in items], axis=0)
+            feats.append(self._pool_square_token_grid(
+                self.encode_single_image(image_batch), image_token_grid_size, target_shape=image_token_grid_shape
+            ))
+        return torch.cat(feats, dim=1).to(dtype=torch.float32).cpu().numpy()
+
     def encode_single_image(self, img_like: object) -> torch.Tensor:
         raise NotImplementedError
 
@@ -893,6 +932,9 @@ def _build_extractor(args: argparse.Namespace, logger: logging.Logger) -> BaseVi
 # ---------------------------
 def extract(args: argparse.Namespace) -> None:
     logger = logging.getLogger("siglip_dynamics.extract")
+    extract_batch_size = int(getattr(args, "extract_batch_size", 1))
+    if extract_batch_size < 1:
+        raise ValueError("extract_batch_size must be at least 1")
 
     out_dir = Path(args.output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -976,10 +1018,11 @@ def extract(args: argparse.Namespace) -> None:
     actions = np.lib.format.open_memmap(out_dir / "actions.npy", mode="w+", dtype=np.float16, shape=(n, action_dim))
     episode_index = np.lib.format.open_memmap(out_dir / "episode_index.npy", mode="w+", dtype=np.int32, shape=(n,))
 
-    for i in range(n):
-        item = ds[i]
-        z = extractor.encode_item(
-            item,
+    for batch_start in range(0, n, extract_batch_size):
+        batch_end = min(batch_start + extract_batch_size, n)
+        items = [ds[i] for i in range(batch_start, batch_end)]
+        z_batch = extractor.encode_items(
+            items,
             image_key=image_key,
             wrist_image_key=wrist_image_key,
             use_wrist_image=use_wrist_image,
@@ -987,27 +1030,28 @@ def extract(args: argparse.Namespace) -> None:
             image_token_grid_size=args.image_token_grid_size,
             image_token_grid_shape=args.image_token_grid_shape,
         )
-        q, s = _quantize_per_token(z)
-        z_q[i] = q
-        z_scale[i] = s
+        for offset, (item, z) in enumerate(zip(items, z_batch, strict=True)):
+            i = batch_start + offset
+            q, s = _quantize_per_token(z)
+            z_q[i] = q
+            z_scale[i] = s
 
-        act_key_i = _resolve_action_key(item, args.action_key)
-        action_raw = _to_float_array_1d(item[act_key_i])
-        ep_i = int(_to_numpy(item["episode_index"]).item())
+            act_key_i = _resolve_action_key(item, args.action_key)
+            action_raw = _to_float_array_1d(item[act_key_i])
+            ep_i = int(_to_numpy(item["episode_index"]).item())
 
-        if args.use_normalized_delta_action:
-            assert action_stats is not None
-            # 官方做法：直接使用归一化后的绝对动作，不计算增量
-            action_out = _normalize_action_quantiles(action_raw, action_stats)
-        else:
-            action_out = action_raw
+            if args.use_normalized_delta_action:
+                assert action_stats is not None
+                # 官方做法：直接使用归一化后的绝对动作，不计算增量
+                action_out = _normalize_action_quantiles(action_raw, action_stats)
+            else:
+                action_out = action_raw
 
-        actions[i] = action_out.astype(np.float16)
+            actions[i] = action_out.astype(np.float16)
+            episode_index[i] = ep_i
 
-        episode_index[i] = ep_i
-
-        if (i + 1) % 5000 == 0:
-            logger.info("Encoded %d / %d frames (%.1f%%)", i + 1, n, (i + 1) * 100.0 / n)
+        if batch_end // 5000 > batch_start // 5000 or batch_end == n:
+            logger.info("Encoded %d / %d frames (%.1f%%)", batch_end, n, batch_end * 100.0 / n)
 
     z_q.flush()
     z_scale.flush()
@@ -1088,6 +1132,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--output-path", type=str, required=True, help="Output directory for extracted cache")
     p.add_argument("--max-output-gb", type=float, default=500.0, help="Abort if estimated size exceeds this cap")
+    p.add_argument(
+        "--extract-batch-size", type=int, default=1,
+        help=("Frames encoded together by the visual backbone. Start with 16 on an H100 and raise while "
+              "monitoring GPU memory; 1 preserves the original single-frame behavior."),
+    )
 
     p.add_argument("--image-key", type=str, default="")
     p.add_argument("--wrist-image-key", type=str, default="")
@@ -1196,6 +1245,8 @@ def main() -> None:
     _setup_logging()
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.extract_batch_size < 1:
+        parser.error("--extract-batch-size must be at least 1")
     extract(args)
 
 

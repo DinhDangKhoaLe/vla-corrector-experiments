@@ -1,0 +1,46 @@
+# Offline action-prefix + expected-future-RMSE Corrector for Kronze157/bbbb.
+# The uncertainty value is an expected latent RMSE, not a probability.
+features:
+  action_prefix: true
+  uncertainty_monitor: true
+model:
+  # Torso camera only: an 8x8 token grid = 64 visual tokens per frame.
+  image_token_grid_size: 8
+  horizons: [10]
+  widths: [2048, 2048, 2048, 2048]
+  action_embed_dim: 256
+  dropout: 0.0
+  uncertainty_hidden: 128
+training:
+  backend: experimental
+  cache: outputs/bbbb_pi05_latents_torso_grid8
+  output: outputs/bbbb_uncertainty_corrector_torso_grid8
+  device: cuda
+  batch_size: 512
+  microbatch_size: 64
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+  cosine_loss_weight: 1.0
+  mse_loss_weight: 1.0
+  uncertainty_loss_weight: 0.1
+uncertainty:
+  rmse_floor: 0.0001
+  episode_quantile: 0.95
+  min_successful_episodes: 50
+  persistence_checks: 2
+  reset_checks: 2
+  release_ratio: 0.8
+  direction_coherence_min: 0.5
+  ogg_enabled: true
+  ogg_uncertainty_quantile: 0.75
+  min_error_correlation: 0.1
+  # Calibration requires successful real-robot/simulator rollouts. Do not run
+  # collect-calibration until a matching runtime adapter writes these traces.
+  traces: outputs/bbbb_uncertainty_calibration/experiment_episodes.jsonl
+  artifact: outputs/bbbb_uncertainty_calibration.json
+

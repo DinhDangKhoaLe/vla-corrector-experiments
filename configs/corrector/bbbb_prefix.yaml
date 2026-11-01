@@ -1,0 +1,27 @@
+# Offline action-prefix ablation for Kronze157/bbbb.
+# Conditions on the ten planned policy actions a_t ... a_(t+9).
+features:
+  action_prefix: true
+  uncertainty_monitor: false
+model:
+  # Torso camera only: an 8x8 token grid = 64 visual tokens per frame.
+  image_token_grid_size: 8
+  horizons: [10]
+  widths: [2048, 2048, 2048, 2048]
+  action_embed_dim: 256
+  dropout: 0.0
+training:
+  backend: experimental
+  cache: outputs/bbbb_pi05_latents_torso_grid8
+  output: outputs/bbbb_prefix_corrector_torso_grid8
+  device: cuda
+  batch_size: 512
+  microbatch_size: 64
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+
