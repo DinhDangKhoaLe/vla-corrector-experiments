@@ -30,6 +30,7 @@ class Model:
 class Training:
     backend: str = "experimental"  # "legacy" launches the untouched original trainer/evaluator.
     cache: str = "outputs/metaworld_mt50_pi05_latents_tf54_fixed"
+    cache_location: str = "disk"
     output: str = "outputs/experiments/vla_corrector_baseline"
     device: str = "cuda"
     epochs: int = 30
@@ -114,6 +115,8 @@ class Experiment:
         if not self.model.widths or len(self.model.widths) < 2 or min(self.model.widths) < 1:
             raise ValueError("model.widths needs at least two positive widths")
         tr = self.training
+        if tr.cache_location not in {"disk", "ram", "gpu"}:
+            raise ValueError("training.cache_location must be disk, ram, or gpu")
         if tr.backend not in {"legacy", "experimental"}:
             raise ValueError("training.backend must be legacy or experimental")
         if tr.backend == "legacy" and (any(asdict(self.features).values()) or self.evaluation.queue_bounded_monitor

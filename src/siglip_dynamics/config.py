@@ -53,6 +53,7 @@ class TrainConfig:
     dataset_path: str = ""
     checkpoint_dir: str = "outputs/siglip_dynamics"
     device: str = "cuda"
+    cache_location: str = "disk"  # disk (memory mapped), ram, or gpu (quantized CUDA tensors).
 
     model: SiglipMLPConfig = field(default_factory=SiglipMLPConfig)
     model_type: ModelType = ModelType.MLP

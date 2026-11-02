@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from siglip_dynamics.dataset import SiglipDynamicsDataset, cache_dataloader
 
 from .config import Experiment
 from siglip_dynamics.visual_tokens import validate_cache_grid
@@ -54,17 +54,19 @@ def train_experiment(cfg: Experiment):
     validate_cache_grid(metadata, cfg.model.image_token_grid_size, target_shape=cfg.model.image_token_grid_shape)
     if metadata.get("action_representation") != "normalized_action":
         raise ValueError("Re-extract with --use-normalized-delta-action; experiments require policy-normalized actions")
-    ids = np.load(root / "episode_index.npy", mmap_mode="r")
+    base = SiglipDynamicsDataset(str(root), k_step=max(cfg.model.horizons),
+                                cache_location=tr.cache_location, cache_device=tr.device)
+    ids = base.ep_idx
     splits = episode_split(ids, tr.val_fraction, tr.test_fraction, tr.seed)
-    train_ds = PrefixDataset(root, cfg.model.horizons, splits["train"])
-    val_ds = PrefixDataset(root, cfg.model.horizons, splits["validation"])
+    train_ds = PrefixDataset(root, cfg.model.horizons, splits["train"], base=base)
+    val_ds = PrefixDataset(root, cfg.model.horizons, splits["validation"], base=base)
     token_dim = train_ds.base.z_q.shape[-1]
     action_dim = train_ds.base.a_t_np.shape[-1]
     model = ExperimentalCorrector(cfg, token_dim, action_dim).to(tr.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=tr.lr, weight_decay=tr.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, tr.epochs, eta_min=tr.lr * 0.01)
-    loaders = {"train": DataLoader(train_ds, batch_size=tr.batch_size, shuffle=True, num_workers=0),
-               "validation": DataLoader(val_ds, batch_size=tr.batch_size, shuffle=False, num_workers=0)}
+    loaders = {"train": cache_dataloader(train_ds, batch_size=tr.batch_size, shuffle=True, num_workers=0),
+               "validation": cache_dataloader(val_ds, batch_size=tr.batch_size, shuffle=False, num_workers=0)}
     out.mkdir(parents=True, exist_ok=True)
     (out / "split_manifest.json").write_text(json.dumps(splits, indent=2))
     (out / "experiment.json").write_text(json.dumps(cfg.to_dict(), indent=2))

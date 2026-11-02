@@ -13,6 +13,20 @@ The dataset, PI0.5 checkpoint, extracted caches, and training outputs are
 large local artifacts. They are ignored by Git and are not included in this
 repository.
 
+## Prior results: original 256-token setup
+
+These prior MetaWorld MT50 results use the original code and the full
+**256-token (16×16) visual representation, without spatial mean pooling**.
+Training was performed on an **RTX 8000 GPU**.
+
+| Method | Easy | Medium | Hard | Very hard | Overall |
+| --- | --- | --- | --- | --- | --- |
+| Plain π0.5 baseline | 44.46% | 38.18% | 39.17% | 27.00% | **40.70%** |
+| Original VLA-Corrector | 81.25% | 50.91% | 50.00% | 28.00% | **65.50%** |
+| Action-prefix only | 79.29% | 51.36% | 52.50% | 35.00% | **65.50%** |
+| PACE π0.5, no Corrector | 82.14% | 46.82% | 52.50% | 38.00% | **66.40%** |
+| Uncertainty Corrector | 80.54% | 49.55% | **57.50%** | **38.00%** | **66.70%** |
+
 ## 1. Create the conda environment
 
 From the repository root:
@@ -537,7 +551,143 @@ The existing full-token commands remain in sections 3–5. The earlier 16-/32-to
 commands and additional representation details are in
 [the spatial-pooling ablation guide](docs/metaworld_spatial_pool_ablation.md).
 
-## 7. What must not be committed to Git
+### Training cache location: disk, RAM or GPU VRAM
+
+Extraction still writes the reusable quantized cache to disk. During training,
+`training.cache_location` selects where to read it from:
+
+| Value | Training behavior |
+| --- | --- |
+| `disk` (default) | Memory-map the cache files and read batches as needed. |
+| `ram` | Load the packed cache into host RAM once before training. |
+| `gpu` | Load the packed cache into CUDA VRAM once; gather and dequantize batches on the GPU. |
+
+This works for Original, Prefix and Uncertainty, including all pooling sizes.
+For example, to train Prefix with the 4×4 spatial mean-pooled cache in VRAM:
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_prefix_pool4.yaml \
+  --mode train \
+  --set training.cache_location=gpu \
+  --set training.output=outputs/experiments/metaworld_prefix_pool4_vram
+```
+
+Use `training.cache_location=ram` for host RAM. The direct Original trainer also
+accepts `--cache-location disk|ram|gpu`. The Brev training launcher forwards the
+same YAML override through `--set training.cache_location=gpu` (its default
+configs still select the 64-token cache).
+
+Features remain int8 and scales remain fp16; only each selected batch is
+dequantized to float32. The 204,806-frame **4×4 grid (16 tokens)** requires about
+**6.72 GB / 6.26 GiB** for packed arrays, versus **26.87 GB / 25.03 GiB** for the
+8×8 grid (64 tokens). Allow additional memory for the model, optimizer and
+dequantized batches. Train and validation share one cache allocation per process;
+distributed training loads a separate copy per rank. GPU mode requires CUDA and
+zero loader workers, as used by both training implementations. An insufficient
+VRAM check reports the required cache size rather than changing modes silently.
+
+## 7. Brev: automated setup and pooled-cache extraction
+
+From your **local checkout**, with the Brev CLI already authenticated:
+
+```bash
+bash scripts/brev/setup.sh
+```
+
+This defaults to instance `primitive-pink-bovid` and remote directory
+`/data/vla-corrector-experiments`. It waits for SSH, copies the source including
+local edits, creates an isolated Python 3.12 environment, downloads MT50 and
+the fine-tuned PI0.5 checkpoint, creates the compatibility view, and extracts
+the **64-token (8×8) spatial mean-pooled cache** from section 6. Ignored local
+datasets, weights, environments, outputs and credentials are excluded from
+the source transfer. Git history is not copied. Downloads occur on the instance.
+
+Setup runs in the background and survives disconnection. The launcher prints
+the log path; inspect progress with:
+
+```bash
+brev exec primitive-pink-bovid 'cat /data/vla-corrector-experiments/outputs/brev/setup.status; tail -n 30 /data/vla-corrector-experiments/outputs/brev/setup-*.log'
+```
+
+Wait for `setup.status` to say `complete` before starting training. The separate
+training launcher defaults to Original Corrector; select another mode or train
+all three sequentially:
+
+```bash
+bash scripts/brev/train.sh original
+bash scripts/brev/train.sh prefix
+bash scripts/brev/train.sh uncertainty
+# Alternatively, train all three in sequence:
+bash scripts/brev/train.sh all
+```
+
+Each invocation starts a background job on the instance, with timestamped logs
+and a `train-<mode>.status` file under `outputs/brev/`. Run one invocation at a
+time. Setup and training share a GPU lock. Existing training outputs follow the
+trainers' overwrite protection; choose a new output for repeated experiments:
+
+```bash
+bash scripts/brev/train.sh prefix --set training.output=outputs/experiments/metaworld_prefix_pool64_repeat
+```
+
+Both local launchers accept `--instance NAME` and `--remote-dir /absolute/path`.
+Setup also accepts `--wait-seconds 900` and `--foreground`. Inside the instance,
+`bash scripts/brev/train.sh --local prefix` runs training in the foreground.
+Calibration and evaluation remain separate, as described in section 6.
+
+After preparing the working evaluation policy/tokenizer compatibility view on
+the instance, the uncertainty workflow can run all stages in sequence:
+
+```bash
+bash scripts/brev/uncertainty.sh --after-prefix
+```
+
+To evaluate Prefix before starting uncertainty training, use this instead:
+
+```bash
+bash scripts/brev/uncertainty.sh --eval-prefix-first
+```
+
+This waits for Prefix training and evaluates its best checkpoint on all 50
+tasks (20 episodes each), then starts the uncertainty stages below. A Prefix
+evaluation failure stops the workflow before uncertainty training begins.
+
+This queues behind a successful Prefix run, then trains the pooled uncertainty
+model, collects 10 episodes per MT50 task with seed 10000 and videos disabled,
+calibrates from successful episodes, and evaluates 20 episodes per task with
+seed 1000 and videos enabled. Calibration comes **after training** and needs
+at least 50 successful episodes. Collection observes the frozen policy without
+triggering recovery; evaluation uses the calibrated alarm. All rollout stages
+use `pretrained_weights/pi05_metaworld_eval_compat`, including its local tokenizer,
+so their policy and protocol identities match. Calibration also checks the error
+head: if its correlation is too weak, evaluation uses ordinary replanning with
+OGG disabled. Existing outputs are preserved and rejected on a fresh launch.
+
+The queued workflow survives disconnection, releases the GPU to the Prefix job
+while waiting, and stops if any stage fails. Check
+`outputs/brev/uncertainty-workflow.status` and its timestamped log for progress.
+Omit `--after-prefix` to start immediately, or use `--through train` /
+`--through calibrate` to stop after that stage. The workflow shares the GPU lock
+with the other Brev jobs; `--instance` and `--remote-dir` are supported too.
+
+The cloud environment uses the repository's `metaworld` and `pi` extras with
+the core pins in `scripts/brev/constraints.txt`. It uses a checksum-verified
+[Miniforge installer](https://github.com/conda-forge/miniforge) and FFmpeg 7.
+TorchCodec 0.5 is paired with PyTorch 2.7.1 according to the
+[official compatibility table](https://github.com/meta-pytorch/torchcodec#compatibility-with-torch-versions).
+This avoids installing every unrelated simulator and optional CUDA extension
+from the full workstation `environment.yml`. The resolved package list is saved
+to `outputs/brev/installed-requirements.txt`.
+
+Allow **at least 160 GB free** for setup, including the datasets library's
+intermediate Arrow copy; use the instance's data disk. Re-running setup resumes
+Hugging Face downloads and validates/reuses a completed cache. Extraction itself
+cannot resume: an incomplete cache is preserved with an `.incomplete.*` suffix
+and extraction starts again. A completed cache with mismatched metadata is
+rejected. The scripts do not start training automatically.
+
+## 8. What must not be committed to Git
 
 Do not commit these local artifacts:
 

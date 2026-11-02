@@ -1,0 +1,10 @@
+# Core versions from environment.yml, with TorchCodec matched to PyTorch 2.7.
+# https://github.com/meta-pytorch/torchcodec#compatibility-with-torch-versions
+torch==2.7.1
+torchvision==0.22.1
+torchcodec==0.5.0
+transformers==5.4.0
+gymnasium==1.2.3
+metaworld==3.0.0
+mujoco==3.6.0
+numpy==2.2.6

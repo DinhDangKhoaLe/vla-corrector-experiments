@@ -31,6 +31,7 @@ def legacy_train_command(cfg):
         token_dim = int(metadata.get("d_dim", token_dim))
         action_dim = int(metadata.get("action_dim", action_dim))
     args = {"dataset-path": tr.cache, "checkpoint-dir": tr.output, "device": tr.device,
+            "cache-location": tr.cache_location,
             "model-type": "mlp", "scale": "20m", "token-dim": token_dim, "action-dim": action_dim,
             "action-embed-dim": model.action_embed_dim, "dropout": model.dropout,
             "h-window": 1, "k-step-list": 10, "batch-size": tr.batch_size, "epochs": tr.epochs,

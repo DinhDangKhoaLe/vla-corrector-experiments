@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset, RandomSampler, SequentialSampler, Subset
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,19 @@ class SiglipDynamicsDataset(Dataset):
         k_step: int = 10,
         h_window: int = 1,
         max_samples: int = 0,
+        cache_location: str = "disk",
+        cache_device: str | torch.device = "cuda",
     ):
         self.data_path = Path(data_path)
         self.k_step = int(k_step)
         self.h_window = int(h_window)
         self.max_samples = int(max_samples)
         self.mode = ""
+        if cache_location not in {"disk", "ram", "gpu"}:
+            raise ValueError("cache_location must be disk, ram, or gpu")
+        self.cache_location = cache_location
+        self.cache_device = torch.device(cache_device)
+        self._gpu_arrays: dict[str, torch.Tensor] = {}
         self.pairs: list[tuple[int, int]] = []
 
         if self.k_step < 1:
@@ -43,6 +50,8 @@ class SiglipDynamicsDataset(Dataset):
         if self.data_path.is_dir() and (self.data_path / "metadata.json").exists():
             self._load_quantized_frame_cache()
         else:
+            if cache_location != "disk":
+                raise ValueError("RAM/GPU cache loading requires an extracted quantized frame cache directory")
             self._load_legacy_triplets()
 
     def _load_legacy_triplets(self) -> None:
@@ -100,6 +109,7 @@ class SiglipDynamicsDataset(Dataset):
         if not self.pairs:
             raise RuntimeError("No valid (t, t+k) pairs found in quantized frame cache.")
 
+        self._preload_cache()
         self.mode = "quantized_frames"
         logger.info(
             "Loaded quantized frame cache: frames=%d pairs=%d shape(L,D)=(%d,%d) k=%d h=%d",
@@ -110,6 +120,61 @@ class SiglipDynamicsDataset(Dataset):
             self.k_step,
             self.h_window,
         )
+
+    def _preload_cache(self) -> None:
+        arrays = {"z_q": self.z_q, "z_scale": self.z_scale, "a_t_np": self.a_t_np}
+        cache_bytes = sum(a.nbytes for a in arrays.values())
+        logger.info("Cache location=%s | quantized features/scales/actions=%.3f GiB",
+                    self.cache_location, cache_bytes / 1024**3)
+        if self.cache_location == "ram":
+            for name, array in arrays.items():
+                setattr(self, name, np.array(array, copy=True))
+            self.ep_idx = np.array(self.ep_idx, copy=True)
+            logger.info("RAM cache loaded; training and validation share the same arrays")
+        elif self.cache_location == "gpu":
+            if self.cache_device.type != "cuda" or not torch.cuda.is_available():
+                raise ValueError("cache_location=gpu requires an available CUDA training device")
+            free, _ = torch.cuda.mem_get_info(self.cache_device)
+            if cache_bytes > free:
+                raise MemoryError(
+                    f"GPU cache needs {cache_bytes / 1024**3:.2f} GiB, but only {free / 1024**3:.2f} GiB is free; "
+                    "use cache_location=ram or disk. Training also needs additional VRAM."
+                )
+            # Chunked copies avoid allocating a second full cache in host RAM.
+            for name, array in arrays.items():
+                dtype = torch.from_numpy(np.empty(0, dtype=array.dtype)).dtype
+                target = torch.empty(array.shape, dtype=dtype, device=self.cache_device)
+                row_bytes = max(1, array[0].nbytes)
+                chunk_rows = max(1, (64 * 1024**2) // row_bytes)
+                for start in range(0, len(array), chunk_rows):
+                    stop = min(start + chunk_rows, len(array))
+                    target[start:stop].copy_(torch.from_numpy(np.array(array[start:stop], copy=True)))
+                self._gpu_arrays[name] = target
+            self.ep_idx = np.array(self.ep_idx, copy=True)
+            logger.info("GPU cache loaded on %s; dequantization and temporal gathers run on GPU", self.cache_device)
+
+    def frames(self, indices) -> torch.Tensor:
+        """Dequantize only selected frames, preserving the stored int8/fp16 values."""
+        if self.cache_location == "gpu":
+            indices = torch.as_tensor(indices, dtype=torch.long, device=self.cache_device)
+            return self._gpu_arrays["z_q"][indices].float() * self._gpu_arrays["z_scale"][indices].float()[..., None]
+        return torch.from_numpy(self._dequantize(self.z_q[indices], self.z_scale[indices]))
+
+    def actions(self, indices) -> torch.Tensor:
+        if self.cache_location == "gpu":
+            indices = torch.as_tensor(indices, dtype=torch.long, device=self.cache_device)
+            return self._gpu_arrays["a_t_np"][indices].float()
+        return torch.from_numpy(np.array(self.a_t_np[indices], dtype=np.float32, copy=True))
+
+    def get_batch(self, indices) -> dict[str, torch.Tensor]:
+        """Gather an entire batch, including histories, without per-sample GPU launches."""
+        pairs = np.asarray([self.pairs[int(i)] for i in indices], dtype=np.int64)
+        t, future = pairs[:, 0], pairs[:, 1]
+        history = t[:, None] - np.arange(self.h_window - 1, -1, -1)
+        z_hist = self.frames(history)
+        z_t = z_hist[:, -1]
+        return {"z_t": z_t, "z_hist": z_hist, "a_t": self.actions(t),
+                "delta_z": self.frames(future) - z_t}
 
     @staticmethod
     def _dequantize(z_q: np.ndarray, z_scale: np.ndarray) -> np.ndarray:
@@ -123,6 +188,8 @@ class SiglipDynamicsDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        if self.cache_location == "gpu":
+            return {key: value[0] for key, value in self.get_batch([idx]).items()}
         if self.mode == "legacy_triplets":
             z_t = self.z_t[idx]
             return {
@@ -145,3 +212,38 @@ class SiglipDynamicsDataset(Dataset):
             "a_t": torch.from_numpy(a_t_np),
             "delta_z": torch.from_numpy(delta_np),
         }
+
+
+class _CacheBatches(Dataset):
+    """Use DataLoader's unbatched mode to pass sampler-selected index lists through."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, indices):
+        dataset = self.dataset
+        while isinstance(dataset, Subset):
+            indices = [dataset.indices[i] for i in indices]
+            dataset = dataset.dataset
+        return dataset.get_batch(indices)
+
+
+def cache_dataloader(dataset, *, batch_size, shuffle=False, sampler=None, num_workers=0, pin_memory=False):
+    """Keep the disk loader unchanged; batch resident caches before dequantization."""
+    base = dataset
+    while isinstance(base, Subset):
+        base = base.dataset
+    location = getattr(base, "cache_location", "disk")
+    if location == "disk":
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, sampler=sampler,
+                          num_workers=num_workers, pin_memory=pin_memory)
+    if location == "gpu" and num_workers:
+        raise ValueError("GPU-resident cache loading requires num_workers=0")
+    if sampler is None:
+        sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+    batches = BatchSampler(sampler, batch_size=batch_size, drop_last=False)
+    return DataLoader(_CacheBatches(dataset), batch_size=None, sampler=batches,
+                      num_workers=num_workers, pin_memory=pin_memory and location != "gpu")

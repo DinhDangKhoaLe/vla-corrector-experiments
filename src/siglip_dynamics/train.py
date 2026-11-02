@@ -18,7 +18,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, random_split
+from torch.utils.data import Dataset, DistributedSampler, random_split
 import wandb
 try:
     from tqdm.auto import tqdm
@@ -27,13 +27,13 @@ except ImportError:
 
 try:
     from .config import LossType, ModelScale, ModelType, SiglipMLPConfig, TrainConfig
-    from .dataset import SiglipDynamicsDataset
+    from .dataset import SiglipDynamicsDataset, cache_dataloader
     from .dit_transformer import SiglipDiTTransformer
     from .MLP import SiglipResidualMLP
     from .transformer import SiglipResidualTransformer
 except ImportError:
     from config import LossType, ModelScale, ModelType, SiglipMLPConfig, TrainConfig
-    from dataset import SiglipDynamicsDataset
+    from dataset import SiglipDynamicsDataset, cache_dataloader
     from dit_transformer import SiglipDiTTransformer
     from MLP import SiglipResidualMLP
     from transformer import SiglipResidualTransformer
@@ -155,6 +155,7 @@ def _build_config(args: argparse.Namespace) -> TrainConfig:
         dataset_path=args.dataset_path,
         checkpoint_dir=args.checkpoint_dir,
         device=args.device,
+        cache_location=args.cache_location,
         model=model_cfg,
         model_type=ModelType(args.model_type),
         h_window=args.h_window,
@@ -275,6 +276,8 @@ def train(cfg: TrainConfig) -> None:
             k_step=cfg.k_step,
             h_window=cfg.h_window,
             max_samples=cfg.max_samples,
+            cache_location=cfg.cache_location,
+            cache_device=device,
         )
 
         total = len(ds)
@@ -296,7 +299,7 @@ def train(cfg: TrainConfig) -> None:
                 "Overriding num_workers=%d -> 0 for stability (avoid DataLoader worker SIGKILL/OOM).",
                 cfg.num_workers,
             )
-        use_pin_memory = torch.cuda.is_available() and device.type == "cuda"
+        use_pin_memory = torch.cuda.is_available() and device.type == "cuda" and cfg.cache_location != "gpu"
         train_sampler = (
             DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
             if _is_distributed()
@@ -307,7 +310,7 @@ def train(cfg: TrainConfig) -> None:
             if _is_distributed()
             else None
         )
-        train_loader = DataLoader(
+        train_loader = cache_dataloader(
             train_ds,
             batch_size=cfg.batch_size,
             shuffle=train_sampler is None,
@@ -315,7 +318,7 @@ def train(cfg: TrainConfig) -> None:
             num_workers=effective_workers,
             pin_memory=use_pin_memory,
         )
-        val_loader = DataLoader(
+        val_loader = cache_dataloader(
             val_ds,
             batch_size=cfg.batch_size,
             shuffle=False,
@@ -818,6 +821,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="outputs/siglip_dynamics",
     )
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--cache-location", choices=("disk", "ram", "gpu"), default="disk",
+                   help="Keep quantized cache memory mapped, preload to host RAM, or preload to training GPU VRAM.")
 
     p.add_argument("--scale", type=str, choices=["4m", "20m", "100m", "custom"], default="20m")
     p.add_argument("--model-type", type=str, choices=["mlp", "transformer", "dit"], default="mlp")
