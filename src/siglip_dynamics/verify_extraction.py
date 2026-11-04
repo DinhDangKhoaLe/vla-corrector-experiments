@@ -72,6 +72,10 @@ def verify(args: argparse.Namespace) -> None:
     if not meta_path.exists():
         raise FileNotFoundError(f"metadata.json not found: {meta_path}")
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    # Recompute with the same timestamp matching rule as extraction. Older
+    # caches predate this metadata field and retain the LeRobot default.
+    if args.video_tolerance_s is None:
+        args.video_tolerance_s = float(meta.get("video_tolerance_s", 1e-4))
 
     z_q = np.load(extracted / "z_q.npy", mmap_mode="r")
     z_scale = np.load(extracted / "z_scale.npy", mmap_mode="r")
@@ -165,6 +169,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset-repo-id", type=str, default="", help="Optional explicit repo_id for local datasets")
     p.add_argument("--dataset-loader", choices=["auto", "parquet", "lerobot"], default="auto")
     p.add_argument("--allow-dataset-download", action="store_true", default=False)
+    p.add_argument(
+        "--video-tolerance-s",
+        type=float,
+        default=None,
+        help="Override video timestamp tolerance in seconds; default is the value recorded in cache metadata.",
+    )
     p.add_argument("--dataset-format", choices=["auto", "libero", "metaworld", "robotwin"], default="auto")
     p.add_argument("--robotwin-tasks", type=str, default="")
     p.add_argument("--extracted-path", type=str, required=True, help="Path to extracted cache (metadata.json + npy files)")

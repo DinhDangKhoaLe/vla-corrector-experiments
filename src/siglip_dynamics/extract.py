@@ -284,6 +284,7 @@ def _looks_like_local_parquet_tree(ds_path: Path) -> bool:
 def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
     dataset_loader = str(getattr(args, "dataset_loader", "auto")).lower()
     allow_dataset_download = bool(getattr(args, "allow_dataset_download", False))
+    video_tolerance_s = float(getattr(args, "video_tolerance_s", 1e-4))
     ds_path = Path(args.dataset_path)
 
     if getattr(args, "dataset_format", "auto") == "robotwin":
@@ -329,6 +330,7 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
                     "repo_id": repo_hint,
                     "root": str(ds_path),
                     "download_videos": False,
+                    "tolerance_s": video_tolerance_s,
                 }
             )
             candidates.append(
@@ -336,6 +338,7 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
                     "repo_id": repo_hint,
                     "root": str(ds_path.parent),
                     "download_videos": False,
+                    "tolerance_s": video_tolerance_s,
                 }
             )
         guessed_repo = ds_path.name
@@ -344,6 +347,7 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
                 "repo_id": f"lerobot/{guessed_repo}",
                 "root": str(ds_path),
                 "download_videos": False,
+                "tolerance_s": video_tolerance_s,
             }
         )
         candidates.append(
@@ -351,13 +355,14 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
                 "repo_id": guessed_repo,
                 "root": str(ds_path.parent),
                 "download_videos": False,
+                "tolerance_s": video_tolerance_s,
             }
         )
-        candidates.append({"repo_id": str(ds_path), "download_videos": False})
+        candidates.append({"repo_id": str(ds_path), "download_videos": False, "tolerance_s": video_tolerance_s})
     else:
         if repo_hint:
-            candidates.append({"repo_id": repo_hint, "download_videos": False})
-        candidates.append({"repo_id": args.dataset_path, "download_videos": False})
+            candidates.append({"repo_id": repo_hint, "download_videos": False, "tolerance_s": video_tolerance_s})
+        candidates.append({"repo_id": args.dataset_path, "download_videos": False, "tolerance_s": video_tolerance_s})
 
     dedup: list[dict] = []
     seen: set[tuple[tuple[str, str], ...]] = set()
@@ -971,6 +976,9 @@ def extract(args: argparse.Namespace) -> None:
     extract_batch_size = int(getattr(args, "extract_batch_size", 1))
     if extract_batch_size < 1:
         raise ValueError("extract_batch_size must be at least 1")
+    video_tolerance_s = float(getattr(args, "video_tolerance_s", 1e-4))
+    if not np.isfinite(video_tolerance_s) or video_tolerance_s <= 0:
+        raise ValueError("video_tolerance_s must be a finite positive number of seconds")
 
     out_dir = Path(args.output_path)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1114,6 +1122,7 @@ def extract(args: argparse.Namespace) -> None:
         "dataset_format": dataset_format,
         "dataset_path": args.dataset_path,
         "dataset_kwargs": ds_kwargs,
+        "video_tolerance_s": video_tolerance_s,
         "encoder_backend": args.encoder_backend,
         "encoder_info": extractor.backend_info(),
         "num_frames": n,
@@ -1157,6 +1166,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Allow LeRobotDataset to auto-download missing files into dataset path",
+    )
+    p.add_argument(
+        "--video-tolerance-s",
+        type=float,
+        default=1e-4,
+        help=(
+            "Maximum timestamp difference, in seconds, when matching a decoded LeRobot video frame. "
+            "The LeRobot default is 0.0001; use 0.001 for known sub-millisecond BBBB timestamp rounding drift."
+        ),
     )
     p.add_argument(
         "--dataset-format",

@@ -8,6 +8,7 @@ set -euo pipefail
 dataset_dir=${1:-datasets/bbbb}
 policy_dir=${2:-pretrained_weights/pi05_bbbb}
 output_dir=${3:-outputs/bbbb_pi05_latents_torso_grid8}
+video_tolerance_s=${VIDEO_TOLERANCE_S:-0.001}
 
 if [[ ! -f "$dataset_dir/meta/info.json" || ! -d "$dataset_dir/videos" ]]; then
   echo "Expected a complete LeRobot v3 snapshot at $dataset_dir (meta/, data/, and videos/)." >&2
@@ -29,6 +30,7 @@ python -m siglip_dynamics.extract \
   --dataset-path "$dataset_dir" \
   --dataset-repo-id Kronze157/bbbb \
   --dataset-loader lerobot \
+  --video-tolerance-s "$video_tolerance_s" \
   --dataset-format libero \
   --image-key observation.images.cam_torso \
   --no-use-wrist-image \
