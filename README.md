@@ -9,6 +9,73 @@ MetaWorld MT50 demonstrations
   → one of: original Corrector / action-prefix / uncertainty Corrector
 ```
 
+## LACo: latent action-controllability corrector
+
+`src/laco` is an independent, lightweight inference-time controller for the
+frozen PI0.5 checkpoint. It does not alter any existing VLA-Corrector code or
+fine-tune PI0.5. It learns a 32-D, PCA-compressed visual-latent local dynamics
+model from the original demonstrations, calibrates a split-conformal anomaly
+threshold on held-out episodes, and chooses **CONTINUE**, **ADJUST**, or
+**REPLAN** for the normal PI0.5 action queue.
+
+First download the same artifacts used by the rest of this repository and make
+the compatibility view:
+
+```bash
+hf download lerobot/metaworld_mt50 --repo-type dataset --local-dir datasets/metaworld_mt50
+hf download tiantianx/pi05_metaworld --local-dir pretrained_weights/pi05_metaworld
+python scripts/make_pi05_compat.py \
+  --source pretrained_weights/pi05_metaworld \
+  --output pretrained_weights/pi05_metaworld_compat
+```
+
+The default configuration is [configs/laco/metaworld_pi05.yaml](configs/laco/metaworld_pi05.yaml).
+All paths are configurable, including with `--set section.key=value`.
+
+```bash
+# 1. Extract frozen PI0.5 SigLIP latents, fit PCA on training episodes only,
+#    and write episode-boundary-safe transitions.
+python -m laco.extract --config configs/laco/metaworld_pi05.yaml
+
+# 2. Train the <1M parameter Jacobian corrector.
+python -m laco.train --config configs/laco/metaworld_pi05.yaml
+
+# 3. Calibrate the EWMA residual threshold from calibration episodes.
+python -m laco.calibrate --config configs/laco/metaworld_pi05.yaml
+
+# 4. Evaluate the full controller (the default has a 10-action execution horizon).
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl EGL_PLATFORM=surfaceless \
+python -m laco.evaluate --config configs/laco/metaworld_pi05.yaml
+```
+
+Convenience wrappers are also available as `scripts/extract_laco_metaworld.sh`,
+`scripts/train_laco_metaworld.sh`, `scripts/calibrate_laco_metaworld.sh`, and
+`scripts/eval_laco_metaworld.sh` (each accepts an optional config path followed
+by normal CLI overrides).
+
+The evaluator supports the requested ablations using the same task, seed,
+episode limit, and action horizon:
+
+```bash
+# Frozen PI0.5 only
+python -m laco.evaluate --config configs/laco/metaworld_pi05.yaml --set evaluation.mode=baseline --set evaluation.output=outputs/laco/eval_baseline
+
+# Calibrated error-triggered replan, no action adjustment
+python -m laco.evaluate --config configs/laco/metaworld_pi05.yaml --set evaluation.mode=replan --set evaluation.output=outputs/laco/eval_replan
+
+# LACo adjustments, without ensemble uncertainty gating
+python -m laco.evaluate --config configs/laco/metaworld_pi05.yaml --set evaluation.mode=laco --set evaluation.output=outputs/laco/eval_laco
+```
+
+For the optional three-model ensemble, train three outputs with different
+`train.seed` values, then pass their checkpoints as a YAML list in
+`evaluation.models`; `full_laco` uses the gain lower confidence bound. Each
+evaluation writes `steps.csv`, `episodes.csv`, and `summary.json` with success,
+policy calls, detector/correction/replan counts, correction outcomes, and both
+latent/corrector/episode timings. The conformal guarantee concerns false alarms
+on exchangeable nominal episodes only; it does not establish that offline
+counterfactual corrections recover a physical rollout.
+
 The dataset, PI0.5 checkpoint, extracted caches, and training outputs are
 large local artifacts. They are ignored by Git and are not included in this
 repository.

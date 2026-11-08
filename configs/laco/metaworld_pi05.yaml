@@ -1,0 +1,52 @@
+# Paths are intentionally relative and may be overridden with --set section.key=value.
+extract:
+  dataset: datasets/metaworld_mt50
+  dataset_repo_id: lerobot/metaworld_mt50
+  dataset_loader: auto
+  policy: pretrained_weights/pi05_metaworld_compat
+  output: outputs/laco/metaworld_transitions
+  device: cuda
+  local_files_only: true
+  pca_dim: 32
+  batch_size: 8
+  val_fraction: 0.1
+  calibration_fraction: 0.1
+  seed: 42
+  normalize_actions: true
+train:
+  cache: outputs/laco/metaworld_transitions
+  output: outputs/laco/jacobian_seed42
+  device: cuda
+  action_dim: 3
+  hidden_dim: 128
+  batch_size: 512
+  epochs: 100
+  patience: 10
+  lr: 0.0003
+  weight_decay: 0.0001
+  cosine_weight: 0.0
+  seed: 42
+calibration:
+  cache: outputs/laco/metaworld_transitions
+  model: outputs/laco/jacobian_seed42/best.pt
+  output: outputs/laco/calibration.json
+  device: cuda
+  split: calibration
+  batch_size: 2048
+  alpha: 0.05
+  ewma_alpha: 0.35
+  trust_region: 0.15
+  lambda_candidates: [0.01, 0.03, 0.1, 0.3]
+evaluation:
+  mode: full_laco
+  policy: pretrained_weights/pi05_metaworld_compat
+  cache: outputs/laco/metaworld_transitions
+  models: [outputs/laco/jacobian_seed42/best.pt]
+  calibration: outputs/laco/calibration.json
+  output: outputs/laco/eval_full
+  tasks: button-press-v3
+  episodes: 5
+  seed: 1000
+  action_horizon: 10
+  episode_limit: 400
+  device: cuda
