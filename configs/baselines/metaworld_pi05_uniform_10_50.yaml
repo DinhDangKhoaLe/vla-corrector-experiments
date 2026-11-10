@@ -1,0 +1,22 @@
+# Draw a discrete uniform execution horizon in [10,50] for each 50-action chunk.
+# RNG is independent of policy/environment sampling. No detector, OGG or temperature control.
+random:
+  strategy: uniform_horizon
+  min_horizon: 10
+  max_horizon: 50
+  seed: 42
+  probability: 0.0  # Unused by uniform_horizon.
+  warmup_steps: 0
+  cooldown_steps: 0
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  device: cuda
+  output: outputs/experiments/eval_metaworld_pi05_50pred_uniform10_50act_seed1000
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  episode_length: 300
+  n_action_steps: 50
+  chunk_size: 50
+  save_video: true
+  reseed_policy_each_episode: true

@@ -438,6 +438,7 @@ class PI05ModifiedPolicy(PI05Policy):
         guidance_apply_every: int,
         guidance_loss_objective: str,
         guidance_compare_baseline: bool,
+        generation_temperature: float = 1.0,
     ) -> dict[str, Any]:
         self.eval()
 
@@ -448,6 +449,10 @@ class PI05ModifiedPolicy(PI05Policy):
 
         actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
         shared_noise = self.model.sample_noise(actions_shape, device)
+        if generation_temperature != 1.0:
+            from siglip_dynamics.coap.temperature import scale_initial_noise
+
+            shared_noise = scale_initial_noise(shared_noise, generation_temperature)
 
         guided_raw = self.model.sample_actions(
             images,

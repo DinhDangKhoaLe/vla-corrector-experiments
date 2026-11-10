@@ -1,21 +1,23 @@
 """Synthetic end-to-end coverage without loading the VLA or starting real jobs."""
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
+from test_corrector_experiments import FakePredictor, make_cache, tiny_config
 
 from siglip_dynamics.experiments.config import from_dict
 from siglip_dynamics.experiments.model import ExperimentalCorrector
 from siglip_dynamics.experiments.runtime import ExperimentPredictor
 from siglip_dynamics.experiments.train import train_experiment
 from siglip_dynamics.experiments.uncertainty import (
-    UncertaintyMonitor, calibrate_uncertainty, normalized_error,
+    UncertaintyMonitor,
+    calibrate_uncertainty,
+    normalized_error,
 )
-from test_corrector_experiments import FakePredictor, make_cache, tiny_config
 
 
 def uncertainty_config(root):
@@ -109,6 +111,15 @@ class UncertaintyTrainingTests(unittest.TestCase):
 
 
 class UncertaintyRuntimeTests(unittest.TestCase):
+    def test_calibration_rejects_monitor_schedule_or_policy_reseeding_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, _, _ = calibrated_monitor(Path(tmp))
+            for name in ('prefix_monitor_every_step', 'reseed_policy_each_episode'):
+                setattr(cfg.evaluation, name, True)
+                with self.assertRaisesRegex(ValueError, 'recollect'):
+                    UncertaintyMonitor(cfg, FakePredictor(), 'evaluate', Path(tmp)/name, {})
+                setattr(cfg.evaluation, name, False)
+
     def test_normalization_floor_and_invalid_inputs(self):
         self.assertAlmostEqual(normalized_error(0.2, 0.02, 1e-4), 10)
         self.assertAlmostEqual(normalized_error(0.2, 0.2, 1e-4), 1)

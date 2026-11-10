@@ -30,6 +30,8 @@ uncertainty:
   traces: outputs/experiments/eval_metaworld_uncertainty_pool64_calibration/experiment_episodes.jsonl
   artifact: outputs/experiments/metaworld_uncertainty_pool64_calibration.json
 evaluation:
+  reseed_policy_each_episode: true
+  prefix_monitor_every_step: true
   output: outputs/experiments/eval_metaworld_uncertainty_pool64
   tasks: easy,medium,hard,very_hard
   episodes: 20

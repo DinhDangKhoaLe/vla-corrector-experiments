@@ -5,6 +5,7 @@ import dataclasses
 import datetime as dt
 import json
 import logging
+import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -632,6 +633,14 @@ class EvalModifiedDetectionConfig:
     safety_model_path: str = ""
     experiment_config: str = ""
     experiment_mode: str = "evaluate"
+    # COAP is an independent executed-pair compatibility detector, using plain replanning.
+    coap_config: str = ""
+    coap_mode: str = "evaluate"
+    policy_only: bool = False
+    # Explicit plain-policy mode; policy_only remains a compatibility alias.
+    disable_corrector: bool = False
+    reseed_policy_each_episode: bool = False
+    random_replan_config: str = ""
     # PACE is a separate, training-free adaptive execution method. When true,
     # no Corrector checkpoint is loaded and no latent-error alarm is applied.
     pace_config: str = ""
@@ -705,7 +714,24 @@ class EvalModifiedDetectionConfig:
 
         if self.pace_disable_corrector and not self.pace_config:
             raise ValueError("--pace_disable_corrector=true requires --pace_config=<pace.yaml>.")
-        if not self.safety_model_path and not self.pace_disable_corrector:
+        plain_policy = self.policy_only or self.disable_corrector
+        if self.random_replan_config and (
+            self.safety_model_path or self.experiment_config or self.coap_config
+            or self.pace_config or plain_policy
+        ):
+            raise ValueError("Random replanning runs separately from learned detectors, PACE and policy-only mode")
+        if self.coap_config and (self.safety_model_path or self.experiment_config or self.pace_config or plain_policy):
+            raise ValueError("COAP runs separately from Corrector, PACE and policy-only comparisons")
+        if plain_policy and (self.safety_model_path or self.experiment_config or self.pace_config):
+            raise ValueError("Policy-only evaluation cannot load a detector or PACE")
+        if self.coap_config or plain_policy or self.random_replan_config:
+            # Never pass a compatibility score into the dynamics-specific OGG interface.
+            self.meltdown_use_guidance_replan = False
+            self.guidance_eta = 0.0
+            self.guidance_compare_baseline = False
+        if not self.safety_model_path and not (
+            self.pace_disable_corrector or self.coap_config or plain_policy or self.random_replan_config
+        ):
             raise ValueError(
                 "Missing safety model path. Please set --safety_model_path=/path/to/your/model_dir_or_parent_dir."
             )
@@ -824,14 +850,20 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
             pace_controller.settings.max_horizon,
             pace_controller.settings.percentile,
         )
-    corrector_enabled = not bool(cfg.pace_disable_corrector)
+    corrector_enabled = not bool(
+        cfg.pace_disable_corrector or cfg.coap_config or cfg.policy_only or cfg.disable_corrector or cfg.random_replan_config
+    )
     if not corrector_enabled and cfg.experiment_config:
         raise ValueError("PACE-only evaluation cannot be combined with --experiment_config.")
-    if not corrector_enabled and pace_controller is None:
+    if not corrector_enabled and pace_controller is None and not (
+        cfg.coap_config or cfg.policy_only or cfg.disable_corrector or cfg.random_replan_config
+    ):
         raise ValueError("PACE-only evaluation needs --pace_config.")
 
     predictor = None
     experiment_monitor = None
+    coap_monitor = None
+    random_controller = None
     if corrector_enabled:
         logging.info("Loading safety predictor from %s", cfg.safety_model_path)
         if cfg.experiment_config:
@@ -842,6 +874,9 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
             predictor, experiment_monitor = load_runtime(
                 cfg.experiment_config, cfg.safety_model_path, str(device), cfg.experiment_mode, output_dir
             )
+            if (experiment_monitor is not None and experiment_monitor.cfg.evaluation.reseed_policy_each_episode
+                    != cfg.reseed_policy_each_episode):
+                raise ValueError("Experiment evaluator reseeding differs from its recorded protocol")
             if cfg.compute_baseline_metrics or cfg.save_guidance_dual_video or cfg.save_baseline_sync_video_with_curve or cfg.save_baseline_et_curve_plot or cfg.save_baseline_step_csv:
                 raise ValueError("Run separate matched baseline/ablation jobs; disable paired plain-policy outputs for experiments")
         else:
@@ -865,7 +900,52 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
         )
     else:
         safety_k = 0
-        logging.info("PACE-only evaluation: Corrector, latent monitor, and OGG guidance are disabled.")
+        logging.info("Corrector dynamics and OGG are disabled for this evaluation mode.")
+
+    if cfg.coap_config:
+        from siglip_dynamics.coap.config import load_config as load_coap_config
+        from siglip_dynamics.coap.runtime import load_runtime as load_coap_runtime
+
+        if not isinstance(cfg.policy, PI05Config) or cfg.env.type != "metaworld":
+            raise ValueError("Initial COAP rollout integration supports PI0.5 on MetaWorld only")
+        coap_cfg = load_coap_config(cfg.coap_config)
+        ev = coap_cfg.evaluation
+        expected_seed = ev.collection_seed if cfg.coap_mode == "collect-calibration" else ev.seed
+        if (cfg.seed != expected_seed or cfg.env.task != ev.tasks or cfg.eval.n_episodes != ev.episodes
+                or cfg.env.episode_length != ev.episode_length or cfg.policy.n_action_steps != ev.n_action_steps
+                or cfg.policy.chunk_size != ev.chunk_size
+                or cfg.reseed_policy_each_episode != ev.reseed_policy_each_episode
+                or Path(cfg.policy.pretrained_path).resolve() != Path(ev.policy).resolve()):
+            raise ValueError("COAP evaluator arguments differ from its recorded rollout protocol")
+        coap_cfg.training.device = str(device)
+        coap_monitor = load_coap_runtime(coap_cfg, cfg.coap_mode, output_dir)
+        if cfg.compute_baseline_metrics or cfg.save_guidance_dual_video or cfg.save_baseline_sync_video_with_curve or cfg.save_baseline_et_curve_plot or cfg.save_baseline_step_csv:
+            raise ValueError("Run a separate matched policy-only comparison for COAP; disable paired baseline outputs")
+
+    if cfg.random_replan_config:
+        from siglip_dynamics.random_replan import RandomReplanController, load_config as load_random_config
+
+        if not isinstance(cfg.policy, PI05Config) or cfg.env.type != "metaworld":
+            raise ValueError("Random replanning initially supports PI0.5 on MetaWorld only")
+        random_cfg = load_random_config(cfg.random_replan_config)
+        ev = random_cfg.evaluation
+        if (cfg.seed != ev.seed or cfg.env.task != ev.tasks or cfg.eval.n_episodes != ev.episodes
+                or cfg.env.episode_length != ev.episode_length or cfg.policy.n_action_steps != ev.n_action_steps
+                or cfg.policy.chunk_size != ev.chunk_size
+                or cfg.reseed_policy_each_episode != ev.reseed_policy_each_episode
+                or Path(cfg.policy.pretrained_path).resolve() != Path(ev.policy).resolve()
+                or output_dir.resolve() != Path(ev.output).resolve()):
+            raise ValueError("Random baseline evaluator arguments differ from its recorded protocol")
+        if cfg.compute_baseline_metrics or cfg.save_guidance_dual_video or cfg.save_baseline_sync_video_with_curve or cfg.save_baseline_et_curve_plot or cfg.save_baseline_step_csv:
+            raise ValueError("Random baseline requires paired baseline outputs disabled")
+        random_controller = RandomReplanController(random_cfg.random, output=output_dir)
+        if random_cfg.random.strategy == "uniform_horizon":
+            logging.info("Random replanning: uniform integer horizon [%d,%d] per chunk, controller seed=%d",
+                         random_cfg.random.min_horizon, random_cfg.random.max_horizon, random_cfg.random.seed)
+        else:
+            logging.info("Random replanning: p=%s per eligible step, controller seed=%d, warmup=%d cooldown=%d",
+                         random_cfg.random.probability, random_cfg.random.seed,
+                         random_cfg.random.warmup_steps, random_cfg.random.cooldown_steps)
 
     logging.info("Building environments.")
     envs_map = make_env(
@@ -958,6 +1038,8 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
             eta=float(cfg.guidance_eta),
         )
     policy.eval()
+    if coap_monitor is not None or random_controller is not None or cfg.policy_only or cfg.disable_corrector:
+        policy.requires_grad_(False)
     required_methods = ("encode_siglip_only", "predict_action_chunk_with_aux")
     if corrector_enabled:
         required_methods = required_methods + ("set_safety_predictor",)
@@ -1086,6 +1168,12 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                         leave=False,
                     )
                     policy.reset()
+                    coap_episode_started = time.perf_counter() if coap_monitor is not None else 0.0
+                    if coap_monitor is not None:
+                        coap_monitor.reset(f"{task_group}:{task_id}", cfg.seed + total_episodes)
+                    random_episode_started = time.perf_counter() if random_controller is not None else 0.0
+                    if random_controller is not None:
+                        random_controller.reset(f"{task_group}:{task_id}", cfg.seed + total_episodes)
                     episode_error = ""
                     if experiment_monitor is not None:
                         experiment_monitor.reset(f"{task_group}:{task_id}", cfg.seed + total_episodes)
@@ -1096,6 +1184,12 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                         observation_baseline = None
                         if env_baseline is not None:
                             observation_baseline, _info_baseline = env_baseline.reset(seed=reset_seed)
+                        # Reset after environment setup, which may consume RNG.
+                        # Each method starts this episode with the same policy
+                        # noise stream; interventions can diverge later draws.
+                        if cfg.reseed_policy_each_episode and seed is not None:
+                            set_seed(seed)
+                            policy.reset()
                     except Exception as exc:
                         episode_error = str(exc)
                         observation = None
@@ -1232,6 +1326,13 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                 preprocessor=preprocessor,
                             )
                             z_t_vec = None
+                            coap_features = None
+                            if coap_monitor is not None:
+                                from siglip_dynamics.coap.runtime import fresh_observation_features
+
+                                feature_started = time.perf_counter()
+                                coap_features = fresh_observation_features(policy, model_input, coap_monitor.predictor.metadata)
+                                coap_monitor.feature_seconds += time.perf_counter() - feature_started
                             if corrector_enabled:
                                 z_t_vec = np.asarray(policy.encode_siglip_only(model_input), dtype=np.float32)
                                 z_history.append((t_env, z_t_vec))
@@ -1378,10 +1479,17 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                         delta_z_pred_queue_baseline.popleft()
 
                             if not action_plan:
+                                coap_generation_kwargs = {}
+                                if coap_monitor is not None and coap_monitor.generation.enabled:
+                                    coap_generation_kwargs["generation_temperature"] = (
+                                        coap_monitor.temperature_for_next_chunk(t_env)
+                                    )
+
                                 def _infer_once(
                                     *,
                                     run_guidance_replan: bool,
                                     compare_baseline: bool,
+                                    generation_kwargs=coap_generation_kwargs,
                                 ) -> tuple[dict[str, Any], float]:
                                     infer_start_local = dt.datetime.now()
                                     resp_local = policy.predict_action_chunk_with_aux(
@@ -1402,6 +1510,7 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                         guidance_apply_every=int(cfg.guidance_apply_every),
                                         guidance_loss_objective=str(cfg.guidance_loss_objective),
                                         guidance_compare_baseline=bool(compare_baseline),
+                                        **generation_kwargs,
                                     )
                                     infer_end_local = dt.datetime.now()
                                     infer_ms_local = float((infer_end_local - infer_start_local).total_seconds() * 1000.0)
@@ -1663,9 +1772,32 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                     delta_z_pred_vec = predictor.predict_delta_z(z_t_vec, raw_action_for_safety)
                                     delta_z_pred_queue.append((t_env + safety_k, np.asarray(delta_z_pred_vec, dtype=np.float32)))
 
+                            # Capture the actual postprocessed command, not a queued future action.
+                            coap_dispatched_action = action_np[0].copy() if coap_monitor is not None else None
                             observation, reward, terminated, truncated, info = env.step(action_np)
                             done = bool(terminated[0] or truncated[0])
                             success = success or _extract_success(info)
+                            if coap_monitor is not None:
+                                from siglip_dynamics.coap.runtime import after_step as coap_after_step
+
+                                # o_t is the pre-action observation. Commit (o_t,a_t) only after env.step returns.
+                                # If interrupted, the next loop builds a new input from the latest real observation.
+                                coap_event = coap_after_step(coap_monitor, coap_features, coap_dispatched_action,
+                                                            t_env + 1, action_plan, raw_action_plan, done=done)
+                                if coap_event is not None:
+                                    step_e_t = coap_event["mismatch"]
+                                    step_thresh = (
+                                        1 - coap_event["threshold"]
+                                        if coap_event["threshold"] is not None else float("nan")
+                                    )
+                                    step_meltdown = coap_event["trigger"]
+                            if random_controller is not None:
+                                from siglip_dynamics.random_replan import after_step as random_after_step
+
+                                random_event = random_after_step(
+                                    random_controller, t_env + 1, action_plan, raw_action_plan, done=done
+                                )
+                                step_meltdown = random_event["trigger"]
                             if env_baseline is not None and observation_baseline is not None and not baseline_done:
                                 observation_baseline, _reward_b, terminated_b, truncated_b, info_b = env_baseline.step(
                                     action_np_baseline
@@ -1728,6 +1860,23 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                             break
                     step_prog.close()
 
+                    if coap_monitor is not None:
+                        coap_episode = coap_monitor.finish(
+                            success, episode_error, vla_calls=action_chunk_infer_requests,
+                            vla_seconds=action_chunk_infer_time_ms_total / 1000.0,
+                            wall_seconds=time.perf_counter() - coap_episode_started)
+                        if episode_error:
+                            raise RuntimeError(f"COAP rollout failed: {episode_error}")
+
+                    if random_controller is not None:
+                        random_episode = random_controller.finish(
+                            success, episode_error, vla_calls=action_chunk_infer_requests,
+                            vla_seconds=action_chunk_infer_time_ms_total / 1000.0,
+                            wall_seconds=time.perf_counter() - random_episode_started,
+                        )
+                        if episode_error:
+                            raise RuntimeError(f"Random baseline rollout failed: {episode_error}")
+
                     if experiment_monitor is not None:
                         # Include the final transition, not a same-step auto-reset frame.
                         if not episode_error and observation is not None:
@@ -1778,6 +1927,17 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                         meltdown_flags=meltdown_flags,
                         episode_error=episode_error,
                     )
+                    if coap_monitor is not None:
+                        summary_row.update({"coap_interventions": coap_episode["intervention_count"],
+                                            "coap_feature_seconds": coap_episode["feature_seconds"],
+                                            "coap_scoring_seconds": coap_episode["scoring_seconds"],
+                                            "coap_wall_seconds": coap_episode["wall_seconds"]})
+                    if random_controller is not None:
+                        summary_row.update({
+                            "random_replan_interventions": random_episode["intervention_count"],
+                            "random_replan_eligible_steps": random_episode["eligible_steps"],
+                            "random_replan_wall_seconds": random_episode["wall_seconds"],
+                        })
                     baseline_summary_row = (
                         _make_episode_summary(
                             task_group=task_group,
@@ -2614,6 +2774,18 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
             global_benchmark_infer_time_total_with_ogg_sec,
             global_benchmark_infer_time_delta_with_minus_without_sec,
         )
+
+        if coap_monitor is not None:
+            from siglip_dynamics.coap.calibration import summarize as summarize_coap
+
+            coap_summary = summarize_coap(output_dir / "coap_episodes.jsonl")
+            (output_dir / "coap_summary.json").write_text(json.dumps(coap_summary, indent=2) + "\n")
+
+        if random_controller is not None:
+            from siglip_dynamics.random_replan import summarize as summarize_random
+
+            random_summary = summarize_random(output_dir / "random_replan_episodes.jsonl")
+            (output_dir / "random_replan_summary.json").write_text(json.dumps(random_summary, indent=2) + "\n")
 
         if save_summary_csv:
             _write_rows_csv(summary_dir / "episode_summary.csv", global_episode_rows)

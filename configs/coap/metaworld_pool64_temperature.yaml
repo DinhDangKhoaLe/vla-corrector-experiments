@@ -1,0 +1,49 @@
+model:
+  window_size: 5
+  hidden_dim: 128
+  embedding_dim: 128
+  num_layers: 1
+  dropout: 0.0
+training:
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  raw_actions: ''
+  output: outputs/experiments/metaworld_coap_pool64
+  device: cuda
+  seed: 42
+  split_seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+  epochs: 30
+  batch_size: 128
+  lr: 0.0003
+  weight_decay: 0.0001
+  temperature: 0.07
+  patience: 5
+  normalization_floor: 0.001
+monitor:
+  artifact: outputs/experiments/metaworld_coap_pool64/calibration.json
+  threshold: null
+  allow_provisional_threshold: false
+  persistence: 2
+  cooldown_steps: 10
+  lower_quantile: 0.05
+  min_successful_episodes: 50
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  checkpoint: outputs/experiments/metaworld_coap_pool64/best_model.pt
+  output: outputs/experiments/eval_metaworld_coap_pool64_temperature
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  collection_seed: 10000
+  episode_length: 300
+  n_action_steps: 10
+  chunk_size: 50
+  save_video: true
+generation:
+  enabled: true
+  min_temperature: 1.0
+  max_temperature: 2.0
+  score_low: 0.0
+  score_high: 0.5
+  warmup_temperature: 1.0

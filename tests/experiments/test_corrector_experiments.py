@@ -4,9 +4,9 @@ python -m unittest discover -s tests/experiments -v
 """
 
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -15,7 +15,12 @@ from siglip_dynamics.experiments.config import Experiment, from_checkpoint_dict,
 from siglip_dynamics.experiments.data import PrefixDataset, episode_split
 from siglip_dynamics.experiments.model import ExperimentalCorrector
 from siglip_dynamics.experiments.run import eval_command, legacy_train_command, resolve
-from siglip_dynamics.experiments.runtime import ExperimentPredictor, RuntimeMonitor, cosine_error, terminal_observation
+from siglip_dynamics.experiments.runtime import (
+    ExperimentPredictor,
+    RuntimeMonitor,
+    cosine_error,
+    terminal_observation,
+)
 from siglip_dynamics.experiments.train import train_experiment
 
 
@@ -128,6 +133,33 @@ class FakePredictor:
         return np.ones_like(z) * float(np.asarray(actions).sum()), float(horizon) / 10
 
 class RuntimeTests(unittest.TestCase):
+    def test_rolling_prefix_uses_only_executed_actions_and_survives_replans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = tiny_config()
+            cfg.model.horizons = [2]
+            cfg.evaluation.prefix_monitor_every_step = True
+            predictor = FakePredictor()
+            calls = []
+            predict = predictor.predict
+            def record(z, actions, horizon):
+                calls.append(np.array(actions, copy=True))
+                return predict(z, actions, horizon)
+            predictor.predict = record
+            monitor = RuntimeMonitor(cfg, predictor, "evaluate", tmp, {})
+            monitor.reset("task:0", 1)
+            z = np.zeros((2,4), dtype=np.float32)
+            self.assertIsNone(monitor.observe(z, 0))
+            monitor.schedule(z, [[1,0],[99,99]], 0)
+            self.assertIsNone(monitor.observe(z+1, 1))
+            monitor.schedule(z+1, [[2,0]], 1)
+            self.assertAlmostEqual(monitor.observe(z+3,2)["score"],0)
+            np.testing.assert_array_equal(calls[-1],[[1,0],[2,0]])
+            monitor.cancel()
+            monitor.schedule(z+3,[[3,0],[99,99]],2)
+            self.assertAlmostEqual(monitor.observe(z+5,3)["score"],0)
+            np.testing.assert_array_equal(calls[-1],[[2,0],[3,0]])
+            self.assertEqual([s["step"] for s in monitor.scores],[2,3])
+
     def test_zero_motion_and_magnitude(self):
         z = np.zeros((2, 4))
         self.assertEqual(cosine_error(z, z), 0)
@@ -166,6 +198,47 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual([p["horizon"] for p in control.pending], [1, 2])
 
 class ConfigurationTests(unittest.TestCase):
+    def test_plain_evaluation_launcher_needs_no_cache_or_corrector_checkpoint(self):
+        from unittest.mock import patch
+
+        from siglip_dynamics.experiments.run import main
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            cfg=load_config('configs/corrector/metaworld_pi05_baseline_pool64.yaml')
+            cfg.training.cache=str(root/'missing-cache')
+            cfg.evaluation.checkpoint=str(root/'missing-corrector.pt')
+            cfg.evaluation.output=str(root/'plain-evaluation')
+            config=root/'plain.yaml'
+            config.write_text(json.dumps(cfg.to_dict()))
+            with patch('sys.argv',['run','--config',str(config),'--mode','evaluate']), patch(
+                'siglip_dynamics.experiments.run.subprocess.run'
+            ) as launch:
+                main()
+            command=launch.call_args.args[0]
+            self.assertIn('--disable_corrector=true',command)
+            self.assertFalse(any('safety_model_path' in arg for arg in command))
+            self.assertTrue((root/'plain-evaluation/resolved_experiment.yaml').is_file())
+
+    def test_metaworld_protocol_and_explicit_plain_policy_command(self):
+        for path in Path('configs/corrector').glob('metaworld_*.yaml'):
+            cfg = load_config(path)
+            self.assertTrue(cfg.evaluation.reseed_policy_each_episode, path)
+            self.assertEqual(cfg.evaluation.prefix_monitor_every_step,cfg.features.action_prefix,path)
+        cfg = load_config('configs/corrector/metaworld_pi05_baseline_pool64.yaml')
+        for backend in ('legacy','experimental'):
+            cfg.training.backend=backend
+            args=eval_command(cfg,'evaluate','resolved.yaml')
+            self.assertIn('--disable_corrector=true',args)
+            self.assertIn('--reseed_policy_each_episode=true',args)
+            self.assertIn('--guidance_eta=0.0',args)
+            self.assertFalse(any('safety_model_path' in arg or 'experiment_config' in arg for arg in args))
+        for value in ('false',0,None):
+            for name in ('prefix_monitor_every_step','corrector_enabled','reseed_policy_each_episode'):
+                with self.assertRaises(ValueError):
+                    from_dict({'evaluation':{name:value}})
+        with self.assertRaisesRegex(ValueError,'requires features.action_prefix'):
+            from_dict({'evaluation':{'prefix_monitor_every_step':True}})
+
     def test_examples_and_cli_switches(self):
         for name in ("baseline", "baseline_matched", "prefix", "uncertainty", "baseline_queue_matched"):
             cfg = load_config(f"configs/corrector/{name}.yaml")

@@ -1,0 +1,18 @@
+# Plain frozen PI0.5: the matched evaluation harness with extra replans disabled.
+# probability=0 never consumes the controller RNG or interrupts action execution.
+random:
+  probability: 0.0
+  seed: 42
+  warmup_steps: 5
+  cooldown_steps: 10
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  device: cuda
+  output: outputs/experiments/eval_metaworld_policy_matched_e10_seed1000
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  episode_length: 300
+  n_action_steps: 10
+  chunk_size: 50
+  save_video: true

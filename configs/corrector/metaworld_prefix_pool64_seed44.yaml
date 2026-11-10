@@ -20,6 +20,8 @@ training:
   val_fraction: 0.1
   test_fraction: 0.1
 evaluation:
+  reseed_policy_each_episode: true
+  prefix_monitor_every_step: true
   policy: pretrained_weights/pi05_metaworld_eval_compat
   checkpoint: ''
   output: outputs/experiments/eval_metaworld_prefix_pool64_seed44

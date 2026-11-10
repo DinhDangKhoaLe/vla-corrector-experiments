@@ -1,0 +1,19 @@
+# A training-free baseline. No Corrector, COAP, OGG or detector calibration.
+random:
+  # Per eligible completed step, not per episode or per VLA chunk.
+  probability: 0.02
+  seed: 42
+  # Earliest extra replan: after completed action 6, matching default COAP warmup/persistence.
+  warmup_steps: 5
+  cooldown_steps: 10
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  device: cuda
+  output: outputs/experiments/eval_metaworld_random_replan_p002_seed42
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  episode_length: 300
+  n_action_steps: 10
+  chunk_size: 50
+  save_video: true

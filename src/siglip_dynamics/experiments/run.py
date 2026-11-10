@@ -6,15 +6,15 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import yaml
 
-from .config import from_dict, load_config
 from siglip_dynamics.visual_tokens import validate_cache_grid, validate_checkpoint_grid
 
+from .config import from_dict, load_config
 
 MODES = ("train", "collect-calibration", "calibrate", "evaluate")
 
@@ -65,11 +65,12 @@ def eval_command(cfg, mode, resolved_path):
         "env.max_parallel_tasks": 1, "eval.batch_size": 1, "eval.n_episodes": ev.episodes,
         "eval.use_async_envs": False, "seed": seed, "output_dir": output,
         "rename_map": {"observation.image": "observation.images.base_0_rgb"},
-        "safety_model_path": checkpoint, "safety_k": max(cfg.model.horizons), "safety_history_frames": 1,
-        "experiment_config": str(resolved_path), "experiment_mode": mode,
-        "guidance_eta": ev.guidance_eta, "guidance_apply_every": ev.guidance_apply_every,
+        "disable_corrector": not ev.corrector_enabled,
+        "reseed_policy_each_episode": ev.reseed_policy_each_episode,
+        "guidance_eta": ev.guidance_eta if ev.corrector_enabled else 0.0,
+        "guidance_apply_every": ev.guidance_apply_every,
         "guidance_loss_objective": "attract_delta_z_correction", "guidance_compare_baseline": False,
-        "meltdown_use_guidance_replan": ev.guidance and mode == "evaluate",
+        "meltdown_use_guidance_replan": ev.corrector_enabled and ev.guidance and mode == "evaluate",
         "meltdown_cooldown_steps": ev.cooldown_steps,
         "save_analysis": True, "compute_baseline_metrics": False,
         "save_raw_video": ev.save_video, "save_sync_video_with_curve": False,
@@ -79,11 +80,16 @@ def eval_command(cfg, mode, resolved_path):
         "save_episode_step_csv": True, "save_guidance_event_csv": True,
         "save_episode_npz": True, "save_summary_csv": True, "save_summary_json": True,
     }
+    if ev.corrector_enabled:
+        args.update(safety_model_path=checkpoint, safety_k=max(cfg.model.horizons), safety_history_frames=1,
+                    experiment_config=str(resolved_path), experiment_mode=mode)
+    elif mode != "evaluate":
+        raise ValueError("Corrector-disabled mode supports evaluate only")
     for name, value in ev.thresholds.items():
         if not name.startswith("threshold_"):
             raise ValueError(f"Only threshold_* keys allowed in evaluation.thresholds: {name}")
         args[name] = value
-    if cfg.training.backend == "legacy":
+    if cfg.training.backend == "legacy" and ev.corrector_enabled:
         # Not even the experimental loader/monitor is used for the legacy baseline.
         args.pop("experiment_config")
         args.pop("experiment_mode")
@@ -110,6 +116,13 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     cfg = resolve(args.config, args.set)
+    if not cfg.evaluation.corrector_enabled and args.mode != "evaluate":
+        raise ValueError("Corrector-disabled mode supports evaluate only")
+    if _is_robotwin_cache(cfg) and (
+        not cfg.evaluation.corrector_enabled or cfg.evaluation.prefix_monitor_every_step
+        or cfg.evaluation.reseed_policy_each_episode
+    ):
+        raise ValueError("These evaluation protocol switches currently require the MetaWorld runner")
     if cfg.training.backend == "legacy" and args.mode not in ("train", "evaluate"):
         raise ValueError("Legacy baseline supports train/evaluate only; collection is an experimental workflow")
     if args.mode in ("collect-calibration", "calibrate") and not cfg.features.uncertainty_monitor:
@@ -154,10 +167,10 @@ def main():
             # RoboTwin is not a Gym/MuJoCo environment. Keep its SAPIEN task lifecycle,
             # three-camera observations and 14-D qpos actions in a dedicated runner.
             from .robotwin_eval import evaluate_robotwin
-            evaluate_robotwin(cfg, mode=mode, config_path=Path(args.config))
+            evaluate_robotwin(cfg, mode=args.mode, config_path=Path(args.config))
             return
         suffix = "_calibration" if args.mode == "collect-calibration" else ""
-        if cfg.model.image_token_grid_size or cfg.model.image_token_grid_shape:
+        if cfg.evaluation.corrector_enabled and (cfg.model.image_token_grid_size or cfg.model.image_token_grid_shape):
             default_checkpoint = "h1_k10" if cfg.training.backend == "legacy" else "best_model.pt"
             checkpoint = cfg.evaluation.checkpoint or str(Path(cfg.training.output) / default_checkpoint)
             validate_checkpoint_grid(checkpoint, cfg.model.image_token_grid_size,

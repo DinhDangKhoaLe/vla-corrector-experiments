@@ -1,0 +1,22 @@
+# Standalone plain PI0.5 matched to the reseeded MetaWorld Corrector protocol.
+# No cache, Corrector checkpoint, prefix monitor, random controller or OGG is loaded.
+features:
+  action_prefix: false
+  uncertainty_monitor: false
+model:
+  image_token_grid_size: 8
+training:
+  output: outputs/unused_metaworld_pi05_baseline
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  output: outputs/experiments/eval_metaworld_pi05_baseline_reseeded
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  n_action_steps: 10
+  chunk_size: 50
+  corrector_enabled: false
+  guidance: false
+  guidance_eta: 0.0
+  reseed_policy_each_episode: true
+  save_video: true

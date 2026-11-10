@@ -8,3 +8,6 @@ gymnasium==1.2.3
 metaworld==3.0.0
 mujoco==3.6.0
 numpy==2.2.6
+
+# SentencePiece 0.2.3 ships Protobuf-7 code; use the compatible tokenizer build.
+sentencepiece==0.2.1

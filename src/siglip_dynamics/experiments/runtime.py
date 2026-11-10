@@ -134,16 +134,22 @@ class RuntimeMonitor:
     def __init__(self, cfg, predictor, mode, output, policy_signature=None):
         self.cfg, self.predictor, self.mode = cfg, predictor, mode
         self.shadow = mode != "evaluate"
-        self.queue_bounded = cfg.features.action_prefix or cfg.evaluation.queue_bounded_monitor
+        self.rolling_prefix = cfg.features.action_prefix and cfg.evaluation.prefix_monitor_every_step
+        self.queue_bounded = ((cfg.features.action_prefix and not self.rolling_prefix)
+                              or cfg.evaluation.queue_bounded_monitor)
         ev = cfg.evaluation
         self.environment_fingerprint = digest({"policy": policy_signature if policy_signature is not None else policy_identity(ev.policy),
                                                "tasks": ev.tasks, "episode_length": ev.episode_length,
                                                "chunk_size": ev.chunk_size, "n_action_steps": ev.n_action_steps,
+                                               "reseed_policy_each_episode": ev.reseed_policy_each_episode,
                                                "implementation": implementation_identity()})
         self.protocol_fingerprint = digest({"environment": self.environment_fingerprint,
                                             "horizons": cfg.model.horizons, "prefix": cfg.features.action_prefix,
                                             "queue_bounded": self.queue_bounded,
-                                            "score": "cosine-zero-aware-v1", "schedule": "rolling-queue-bounded-prefix-v1"})
+                                            "rolling_prefix": self.rolling_prefix,
+                                            "score": "cosine-zero-aware-v1",
+                                            "schedule": ("executed-prefix-every-step-v1" if self.rolling_prefix
+                                                         else "forecast-pending-v1")})
         self.calibration_ids = set()
         self.threshold = None
         self.output = Path(output) / "experiment_episodes.jsonl"
@@ -151,6 +157,7 @@ class RuntimeMonitor:
         if self.output.exists():
             raise FileExistsError(f"Choose a fresh evaluation output; {self.output} exists")
         self.pending, self.scores = [], []
+        self.state_history, self.action_history = {}, {}
         self.cooldown_until = -1
 
     def reset(self, task, seed):
@@ -158,6 +165,7 @@ class RuntimeMonitor:
             raise ValueError("Evaluation task-seed overlaps a held-out calibration episode")
         self.task, self.seed = task, seed
         self.pending, self.scores = [], []
+        self.state_history, self.action_history = {}, {}
         self.cooldown_until = -1
         self.cancellations = 0
         self.start_time = perf_counter()
@@ -165,6 +173,14 @@ class RuntimeMonitor:
         self.start_prediction_ms = getattr(self.predictor, "prediction_ms", 0.0)
 
     def schedule(self, z, actions, step):
+        if self.rolling_prefix:
+            actions = np.asarray(actions, dtype=np.float32)
+            if actions.ndim != 2 or len(actions) < 1:
+                raise ValueError("Every-step prefix monitoring requires the next executed action")
+            # Only the next action is guaranteed to execute; future queue items
+            # may be discarded by a replan. Preserve completed history on cancel.
+            self.action_history[int(step)] = np.array(actions[0], copy=True)
+            return
         for h in self.cfg.model.horizons:
             if self.queue_bounded and len(actions) < h:
                 continue
@@ -174,20 +190,47 @@ class RuntimeMonitor:
                                  "prediction": pred, "horizon": h, "uncertainty": error})
 
     def observe(self, z, step):
+        if self.rolling_prefix:
+            step = int(step)
+            self.state_history[step] = np.array(z, dtype=np.float32, copy=True)
+            event = None
+            for horizon in self.cfg.model.horizons:
+                start = step - horizon
+                if start not in self.state_history or any(
+                    i not in self.action_history for i in range(start, step)
+                ):
+                    continue
+                actions = np.stack([self.action_history[i] for i in range(start, step)])
+                prediction, uncertainty = self.predictor.predict(self.state_history[start], actions, horizon)
+                candidate = self._score_transition(
+                    self.state_history[start], z, prediction, uncertainty, step, horizon
+                )
+                if event is None or candidate["score"] > event["score"]:
+                    event = candidate
+            oldest = step - max(self.cfg.model.horizons)
+            self.state_history = {i: value for i, value in self.state_history.items() if i >= oldest}
+            self.action_history = {i: value for i, value in self.action_history.items() if i >= oldest}
+            return event
         due = [p for p in self.pending if p["due"] == step]
         self.pending = [p for p in self.pending if p["due"] > step]
         event = None
         for p in due:
-            actual = z - p["start"]
-            score = cosine_error(p["prediction"], actual)
-            rmse = float(np.sqrt(np.mean((p["prediction"]-actual)**2)))
-            if not np.isfinite(score) or not np.isfinite(rmse):
-                raise FloatingPointError("Nonfinite monitor observation")
-            self.scores.append({"step": step, "horizon": p["horizon"], "score": score,
-                                "rmse": rmse, "predicted_rmse": p["uncertainty"]})
-            if event is None or score > event["score"]:
-                event = {"score": score, "actual": actual, "prediction": p["prediction"], "horizon": p["horizon"]}
+            candidate = self._score_transition(p["start"], z, p["prediction"], p["uncertainty"], step, p["horizon"])
+            if event is None or candidate["score"] > event["score"]:
+                event = candidate
         return event
+
+    def _score_transition(self, start, current, prediction, uncertainty, step, horizon):
+        actual = np.asarray(current) - np.asarray(start)
+        prediction = np.asarray(prediction)
+        score = cosine_error(prediction, actual)
+        rmse = float(np.sqrt(np.mean((prediction - actual) ** 2)))
+        if not np.isfinite(score) or not np.isfinite(rmse):
+            raise FloatingPointError("Nonfinite monitor observation")
+        self.scores.append({"step": int(step), "horizon": int(horizon), "score": score,
+                            "rmse": rmse, "predicted_rmse": uncertainty})
+        return {"score": score, "actual": actual, "prediction": prediction,
+                "horizon": int(horizon), "rmse": rmse, "predicted_rmse": uncertainty}
 
     def cancel(self):
         self.cancellations += len(self.pending)

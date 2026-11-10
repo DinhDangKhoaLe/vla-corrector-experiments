@@ -9,6 +9,7 @@ training:
   cache: outputs/metaworld_mt50_pi05_latents_pool64
   output: outputs/experiments/metaworld_original_pool64
 evaluation:
+  reseed_policy_each_episode: true
   checkpoint: ''
   output: outputs/experiments/eval_metaworld_original_pool64
   tasks: easy,medium,hard,very_hard

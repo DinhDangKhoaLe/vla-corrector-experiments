@@ -1,0 +1,23 @@
+# Plain frozen PI0.5: predict 50 and execute all 50 before the next policy query.
+features:
+  action_prefix: false
+  uncertainty_monitor: false
+training:
+  device: cuda
+  output: outputs/unused_plain_pi05_50act
+model:
+  image_token_grid_size: 8
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  output: outputs/experiments/eval_metaworld_pi05_plain_50pred_50act_seed1000
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  episode_length: 300
+  n_action_steps: 50
+  chunk_size: 50
+  corrector_enabled: false
+  guidance: false
+  guidance_eta: 0.0
+  reseed_policy_each_episode: true
+  save_video: true

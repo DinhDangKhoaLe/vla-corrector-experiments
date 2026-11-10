@@ -10,6 +10,7 @@ training:
   cache: outputs/metaworld_mt50_pi05_latents_pool4
   output: outputs/experiments/metaworld_original_pool4
 evaluation:
+  reseed_policy_each_episode: true
   checkpoint: ''  # Resolves to this run's training.output/h1_k10.
   output: outputs/experiments/eval_metaworld_original_pool4
   tasks: easy,medium,hard,very_hard

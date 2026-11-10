@@ -13,6 +13,53 @@ The dataset, PI0.5 checkpoint, extracted caches, and training outputs are
 large local artifacts. They are ignored by Git and are not included in this
 repository.
 
+## COAP: Contrastive Observation Action Pretraining
+
+COAP is a separate two-tower observation–action compatibility detector. It
+scores a rolling window of five same-timestep pairs after their actions execute,
+then interrupts low-compatibility chunks with plain replanning. The VLA remains
+frozen. COAP has its own configuration and training/calibration pipeline; existing
+Corrector defaults and its OGG correction path remain available separately.
+
+See the [COAP implementation and commands](docs/coap.md) and
+[MetaWorld COAP config](configs/coap/metaworld_pool64.yaml).
+
+For a training-free control, the [random-replanning baseline](docs/random_replanning.md)
+uses random interrupts with the same 10-action execution schedule and no learned
+detector or OGG. Set its probability to zero for a matched plain-policy control.
+
+### MetaWorld evaluation protocol updates (2026-11-05)
+
+The `configs/corrector/metaworld_*.yaml` configurations now reset the policy RNG
+after each environment reset (`evaluation.reseed_policy_each_episode: true`).
+Prefix and uncertainty variants also enable
+`evaluation.prefix_monitor_every_step: true`: after K warm-up actions, each
+step compares the observed change with a prediction conditioned on the K
+actions actually executed, including across replans. Training, cache placement
+(disk/RAM/VRAM), and model architectures are unchanged.
+
+For a standalone plain PI0.5 control, use:
+
+```bash
+python -m siglip_dynamics.experiments.run \
+  --config configs/corrector/metaworld_pi05_baseline_pool64.yaml \
+  --mode evaluate
+```
+
+This sets `evaluation.corrector_enabled: false`, which passes
+`--disable_corrector=true` to the evaluator. It loads no Corrector, COAP,
+PACE, or random controller and disables OGG. The earlier `--policy_only=true`
+flag remains an alias for plain-policy evaluation.
+
+Use fresh evaluation output folders. Uncertainty calibration must be collected
+and fitted again for the new monitoring/reseeding protocol; existing weights
+and extracted caches can be reused. Historical result tables still describe
+the earlier protocol. To reproduce that protocol, set both new evaluation
+switches to `false` (only reseeding applies to Original). Their schema defaults
+remain `false`, and existing COAP/random configurations keep their prior
+behavior. Those launchers also accept
+`--set evaluation.reseed_policy_each_episode=true` for future matched runs.
+
 ## 1. Create the conda environment
 
 From the repository root:

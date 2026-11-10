@@ -1,0 +1,72 @@
+features:
+  action_prefix: false
+  uncertainty_monitor: false
+model:
+  image_token_grid_size: 8
+  image_token_grid_shape: []
+  horizons:
+  - 10
+  widths:
+  - 2048
+  - 2048
+  - 2048
+  - 2048
+  action_embed_dim: 256
+  dropout: 0.0
+  uncertainty_hidden: 128
+training:
+  backend: experimental
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  cache_location: disk
+  output: outputs/unused_metaworld_pi05_baseline
+  device: cuda
+  epochs: 30
+  batch_size: 512
+  microbatch_size: 64
+  lr: 0.0003
+  weight_decay: 0.0001
+  patience: 5
+  seed: 42
+  val_fraction: 0.1
+  test_fraction: 0.1
+  uncertainty_loss_weight: 0.1
+  mse_loss_weight: 1.0
+  cosine_loss_weight: 1.0
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_eval_compat
+  checkpoint: ''
+  output: outputs/experiments/eval_metaworld_pi05_plain_reseeded_20261105
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  collection_seed: 2000
+  episode_length: 300
+  n_action_steps: 10
+  chunk_size: 50
+  guidance: false
+  guidance_eta: 0.0
+  guidance_apply_every: 1
+  cooldown_steps: 10
+  save_video: true
+  prefix_monitor_every_step: false
+  corrector_enabled: false
+  reseed_policy_each_episode: true
+  queue_bounded_monitor: false
+  robotwin_root: third_party/RoboTwin
+  robotwin_task_config: demo_clean
+  robotwin_tasks: ''
+  robotwin_expert_check: true
+  thresholds: {}
+uncertainty:
+  rmse_floor: 0.0001
+  persistence_checks: 2
+  reset_checks: 2
+  release_ratio: 0.8
+  direction_coherence_min: 0.5
+  ogg_enabled: true
+  ogg_uncertainty_quantile: 0.75
+  min_error_correlation: 0.1
+  episode_quantile: 0.95
+  min_successful_episodes: 50
+  traces: outputs/experiments/eval_uncertainty_calibration/experiment_episodes.jsonl
+  artifact: outputs/experiments/uncertainty_calibration.json

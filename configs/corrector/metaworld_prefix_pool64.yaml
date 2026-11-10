@@ -8,6 +8,8 @@ training:
   cache: outputs/metaworld_mt50_pi05_latents_pool64
   output: outputs/experiments/metaworld_prefix_pool64
 evaluation:
+  reseed_policy_each_episode: true
+  prefix_monitor_every_step: true
   output: outputs/experiments/eval_metaworld_prefix_pool64
   tasks: easy,medium,hard,very_hard
   episodes: 20

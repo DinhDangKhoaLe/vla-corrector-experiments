@@ -81,6 +81,12 @@ class Evaluation:
     guidance_apply_every: int = 1
     cooldown_steps: int = 10
     save_video: bool = True
+    # Score each completed K-action transition, including across replans.
+    prefix_monitor_every_step: bool = False
+    # Standalone plain-policy evaluation; never loads a Corrector or monitor.
+    corrector_enabled: bool = True
+    # Reset policy sampling after env.reset, independently for each episode.
+    reseed_policy_each_episode: bool = False
     # Schedule-matched single-action control for the prefix ablation.
     queue_bounded_monitor: bool = False
     # Native RoboTwin/SAPIEN rollout settings. They are ignored by MetaWorld.
@@ -132,9 +138,15 @@ class Experiment:
             raise ValueError("Invalid evaluation horizon, episode length or episode count")
         if max(h) > ev.n_action_steps and self.features.action_prefix:
             raise ValueError("Prefix horizons cannot exceed evaluation.n_action_steps")
+        if ev.prefix_monitor_every_step and not self.features.action_prefix:
+            raise ValueError("prefix_monitor_every_step requires features.action_prefix=true")
+        if ev.prefix_monitor_every_step and ev.queue_bounded_monitor:
+            raise ValueError("Every-step prefix monitoring cannot be queue bounded")
         if self.features.uncertainty_monitor:
             import math
             u = self.uncertainty
+            if not self.features.action_prefix:
+                raise ValueError("uncertainty_monitor requires features.action_prefix=true")
             if len(h) != 1:
                 raise ValueError("Uncertainty monitor requires one fixed K")
             if min(tr.mse_loss_weight, tr.cosine_loss_weight, tr.uncertainty_loss_weight) <= 0:
@@ -175,7 +187,8 @@ def from_dict(raw: dict) -> Experiment:
     cfg = Experiment(**parts)
     for section, names in {"features": ("action_prefix", "uncertainty_monitor"),
                            "uncertainty": ("ogg_enabled",),
-                           "evaluation": ("guidance", "save_video", "queue_bounded_monitor",
+                           "evaluation": ("guidance", "save_video", "prefix_monitor_every_step",
+                                          "corrector_enabled", "reseed_policy_each_episode", "queue_bounded_monitor",
                                           "robotwin_expert_check")}.items():
         for name in names:
             if type(getattr(getattr(cfg, section), name)) is not bool:
