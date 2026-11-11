@@ -57,6 +57,8 @@ def make_method(config, *, head=None, stochastic=False):
         from .bcp import BCP, ContinuationHead
         if head is None:
             checkpoint = torch.load(settings["artifact"], map_location="cpu", weights_only=True)
+            if checkpoint.get("optimized_groups", checkpoint.get("step", 0)) < 1:
+                raise ValueError("BCP head has no successful training groups; resume training before evaluation")
             if checkpoint["head_config"] != settings["head"]:
                 raise ValueError("BCP checkpoint head configuration differs from evaluation config")
             if checkpoint["policy"] != config["policy"]:

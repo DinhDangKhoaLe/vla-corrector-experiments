@@ -9,7 +9,7 @@ import torch
 from .config import ROOT, load_config, make_method
 from .pace import calibrate
 from .policy import Pi05Sampler
-from .rollout import evaluate, make_env, seed_policy
+from .rollout import evaluate, make_env, reset_env, seed_policy
 from .train_bcp import train
 
 
@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--output", required=True, help="New directory for smoke artifacts")
     parser.add_argument("--episode-length", type=int, default=55)
     args = parser.parse_args()
+    if args.episode_length < 1:
+        parser.error("--episode-length must be positive")
     os.environ.setdefault("MUJOCO_GL", "egl")
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -35,15 +37,19 @@ def main():
     print("π0.5: strict pretrained load complete", flush=True)
     env = make_env("reach-v3", configurations["autohorizon"]["evaluation"])
     try:
+        observation, first_state = reset_env(env, 1000)
+        _, second_state = reset_env(env, 1000)
+        assert first_state == second_state
         seed_policy(1000)
-        observation, _ = env.reset(seed=1000)
         sampler.prepare(observation, env.task_description)
         noise = sampler.model.sample_noise((1, 50, 32), sampler.device)
         images, masks = sampler.policy._preprocess_images(sampler.batch)
         from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK
         native = sampler.model.sample_actions(images, masks, sampler.batch[OBS_LANGUAGE_TOKENS],
                                               sampler.batch[OBS_LANGUAGE_ATTENTION_MASK], noise=noise.clone())
-        sampled = sampler.sample(noise=noise.clone(), attention_step=3, features=True)
+        sampled = sampler.sample(noise=noise.clone(),
+                                 attention_step=configurations["autohorizon"]["settings"]["attention_step"],
+                                 features=True)
         torch.testing.assert_close(sampled.normalized, native[0], rtol=0, atol=0)
         assert sampled.attention.shape == (50, 50)
         assert sampled.context.shape[-1] == 2048
@@ -63,14 +69,21 @@ def main():
     config = configurations["bcp"]
     config["settings"]["artifact"] = str(output / "smoke_bcp_head.pt")
     config["training"].update(tasks="reach-v3", steps=1, output=str(output / "bcp_training"))
-    config["evaluation"]["episode_length"] = 12
+    # Allow a successful trajectory: all-failure groups must be discarded by
+    # BCP and cannot test a genuine optimizer update.
+    config["evaluation"]["episode_length"] = max(100, args.episode_length)
     train(config, sampler)
     first = torch.load(config["settings"]["artifact"], map_location="cpu", weights_only=True)
     config["training"]["steps"] = 2
     train(config, sampler, resume=True)
     second = torch.load(config["settings"]["artifact"], map_location="cpu", weights_only=True)
     assert first["step"] == 1 and second["step"] == 2
-    assert not torch.equal(first["head"]["output.weight"], second["head"]["output.weight"])
+    training_rows = [json.loads(line) for line in
+                     (Path(config["training"]["output"]) / "training.jsonl").read_text().splitlines()]
+    updates = sum(not row["skipped"] for row in training_rows)
+    assert updates > 0, "BCP smoke needs a successful training group to verify optimization"
+    if not training_rows[-1]["skipped"]:
+        assert not torch.equal(first["head"]["output.weight"], second["head"]["output.weight"])
     config["evaluation"]["episode_length"] = args.episode_length
     results["bcp"] = evaluate(config, sampler, make_method(config), output / "bcp")
     assert all(p.grad is None for p in sampler.policy.parameters())
@@ -78,7 +91,8 @@ def main():
               "conditional_anchors_exact": True, "frozen_policy": True,
               "pace_calibration_tasks": len(calibration["thresholds"]),
               "pace_calibration_episodes": sum(calibration["episode_counts"].values()),
-              "bcp_train_and_resume_steps": 2, "evaluation": results,
+              "bcp_train_and_resume_steps": 2, "bcp_optimizer_groups": updates,
+              "deterministic_reset": True, "evaluation": results,
               "note": "Smoke BCP head is not benchmark trained; these are integration checks, not performance claims."}
     (output / "verification.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))

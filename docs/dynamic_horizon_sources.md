@@ -68,6 +68,9 @@ decisions. Only the continuation head is trained. Offline demonstrations cannot
 replace the online counterfactual rollouts required by this objective. The local
 checkpoint already supplies the pretrained action policy; no additional VLA
 fine-tuning is performed.
+Groups in which the reference and all adaptive rollouts fail are discarded,
+as specified in the paper. The training step counter counts sampled groups;
+`skipped` in `training.jsonl` distinguishes these from optimizer updates.
 
 ## Runtime and evaluation conventions
 
@@ -75,10 +78,13 @@ fine-tuning is performed.
   symlink view removes unsupported config metadata without changing weights.
 - Strict local weight loading fails on missing keys/shapes, instead of accepting
   the upstream loader's random-weight fallback after a load error.
+- Both typed π0.5 configs and legacy compatibility views missing the `type`
+  field are decoded strictly as PI05Config; the checkpoint files are unchanged.
 - Tokenizer: cached public OpenPI PaliGemma SentencePiece model, exact BOS/token
   IDs and right padding. Saved state normalization and action unnormalization
   remain in use; missing wrist cameras retain the policy's masked padding.
-- AutoHorizon reads all action-expert layers/heads at zero-based denoising step 3.
+- AutoHorizon reads all action-expert layers/heads at zero-based denoising step 2
+  (the third step: the author's counter is incremented before testing `== 3`).
   BCP reads valid visual-language context and final expert velocity features.
 - This runner uses eager attention for vision, language and action modules.
   The installed PyTorch 2.7.1/CUDA 12.8 SigLIP SDPA path produced differing
@@ -94,11 +100,16 @@ fine-tuning is performed.
   MuJoCo data is reset before hand initialization to remove residual physical
   state. Policy RNG is reseeded after reset. This fixes reproducibility in this
   runner; historical results from the old reset behavior are not bitwise matched.
+  The current EGL renderer can differ by one uint8 intensity level on repeated
+  identical physical states, so physical reset equality does not imply bitwise
+  identical images or rollouts across hardware/backends.
 - BCP logs and checks physical-state fingerprints for identical initial group
   states; its training seed starts at 100000, separate from evaluation seeds.
 - Default inference precision is bfloat16 (vision/norm exceptions follow this
   repository's π0.5 implementation) for the local 16 GB GPU. This is a precision
   choice, not a claim of matching float32 baseline results.
+  This default is retained on the current 48 GB Quadro RTX 8000, which emulates
+  bfloat16; the current environment uses PyTorch 2.10.0+cu128/Transformers 5.4.0.
 - Required simulator version is the repository-pinned `mujoco==3.6.0`.
   MuJoCo 4.0 changes equality-data layout and breaks the installed MetaWorld 3.0.
 
@@ -112,3 +123,5 @@ checkpoint resume, reload and evaluation checks. Its BCP head is deliberately
 stored separately and must not be reported as a fully trained benchmark model.
 Full 50-task performance evaluations and production BCP training are separate
 commands in the two root text files.
+The [11 November verification record](dynamic_horizon_verification.md) gives
+the current machine's checks, artifacts and limits.

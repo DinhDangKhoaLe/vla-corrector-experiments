@@ -21,6 +21,14 @@ def optimize_group(head, optimizer, trajectories, rewards, settings):
     decisions = sum(map(len, trajectories))
     if not decisions or len(rewards) != len(trajectories) + 1:
         raise ValueError("GRPO needs adaptive decisions and exactly one reference reward")
+    if not torch.isfinite(rewards).all():
+        raise ValueError("GRPO rewards must be finite")
+    # The paper discards groups where every rollout, including the reference,
+    # fails. An entropy-only update would otherwise train on discarded groups.
+    if bool((rewards == 0).all()):
+        head.eval()
+        return {"skipped": True, "reason": "all_rollouts_failed", "decisions": decisions,
+                "rewards": rewards.cpu().tolist(), "advantages": advantages.cpu().tolist()}
     head.train()
     metrics = {}
     for _ in range(settings["update_epochs"]):
@@ -46,7 +54,7 @@ def optimize_group(head, optimizer, trajectories, rewards, settings):
         optimizer.step()
         metrics = {"loss": total_loss, "entropy": total_entropy, "gradient_norm": float(gradient_norm)}
     head.eval()
-    return {**metrics, "decisions": decisions, "rewards": rewards.cpu().tolist(),
+    return {**metrics, "skipped": False, "decisions": decisions, "rewards": rewards.cpu().tolist(),
             "advantages": advantages.cpu().tolist()}
 
 
@@ -59,7 +67,7 @@ def train(config, sampler, resume=False):
     seed_policy(settings["seed"])
     head = ContinuationHead(**config["settings"]["head"]).to(config["policy"]["device"])
     optimizer = torch.optim.AdamW(head.parameters(), lr=settings["learning_rate"], weight_decay=settings["weight_decay"])
-    start_step = 0
+    start_step = optimized_groups = 0
     if resume:
         saved = torch.load(artifact, map_location="cpu", weights_only=True)
         if saved["head_config"] != config["settings"]["head"] or saved["policy"] != config["policy"]:
@@ -72,6 +80,7 @@ def train(config, sampler, resume=False):
         head.load_state_dict(saved["head"])
         optimizer.load_state_dict(saved["optimizer"])
         start_step = saved["step"]
+        optimized_groups = saved.get("optimized_groups", start_step)
         output.mkdir(parents=True, exist_ok=True)
     else:
         if artifact.exists():
@@ -108,20 +117,23 @@ def train(config, sampler, resume=False):
                                               settings["delta_plus"], settings["delta_minus"])
                            for r in rollouts] + [float(reference["success"])]
                 metrics = optimize_group(head, optimizer, trajectories, rewards, settings)
+                optimized_groups += int(not metrics["skipped"])
                 if any(parameter.grad is not None for parameter in sampler.policy.parameters()):
                     raise RuntimeError("Frozen π0.5 received gradients")
-                row = {"step": step + 1, "task": task, "env_seed": env_seed,
+                row = {"step": step + 1, "optimized_groups": optimized_groups, "task": task, "env_seed": env_seed,
                        "reference": reference, "adaptive": rollouts, **metrics}
                 log.write(json.dumps(row) + "\n")
                 log.flush()
                 temporary = artifact.with_suffix(artifact.suffix + ".tmp")
-                torch.save({"step": step + 1, "head_config": config["settings"]["head"],
+                torch.save({"step": step + 1, "optimized_groups": optimized_groups,
+                            "head_config": config["settings"]["head"],
                             "head": head.state_dict(), "optimizer": optimizer.state_dict(),
                             "policy": config["policy"], "config": config}, temporary)
                 temporary.replace(artifact)
                 print(json.dumps({k: v for k, v in row.items() if k not in ("adaptive", "reference")}), flush=True)
                 status_path.write_text(json.dumps({"status": "running", "completed_steps": step + 1}))
-        result = {"status": "complete", "completed_steps": max(start_step, settings["steps"]), "artifact": str(artifact)}
+        result = {"status": "complete", "completed_steps": max(start_step, settings["steps"]),
+                  "optimized_groups": optimized_groups, "artifact": str(artifact)}
         status_path.write_text(json.dumps(result, indent=2) + "\n")
         return result
     except BaseException as exc:

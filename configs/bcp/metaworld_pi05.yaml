@@ -5,7 +5,7 @@ policy:
   checkpoint: pretrained_weights/pi05_metaworld_compat
   tokenizer_model: ~/.cache/openpi/big_vision/paligemma_tokenizer.model
   device: cuda
-  dtype: bfloat16  # fits the local 16 GB GPU; use float32 on a sufficiently large GPU
+  dtype: bfloat16  # memory-saving comparison default; use float32 if preferred with enough GPU memory
   denoising_steps: 10
 evaluation:
   seed: 1000

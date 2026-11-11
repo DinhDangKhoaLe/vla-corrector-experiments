@@ -13,6 +13,20 @@ The dataset, PI0.5 checkpoint, extracted caches, and training outputs are
 large local artifacts. They are ignored by Git and are not included in this
 repository.
 
+## Dynamic execution horizons on MetaWorld
+
+AutoHorizon, AAC, PACE, A³ and BCP use the downloaded π0.5 checkpoint through
+the independent `src/dynamic_horizon` package. Each method has its own source
+module and config folder. Prediction length and maximum execution length are
+50; evaluation starts at seed 1000, and each method selects the executed prefix.
+
+See [training and calibration commands](training.txt),
+[evaluation commands](evaluation.txt), and
+[source references and MetaWorld adaptations](docs/dynamic_horizon_sources.md).
+AutoHorizon, AAC and A³ need no training; PACE calibrates on demonstrations;
+BCP trains a continuation head using online MetaWorld rollouts. VLA-Corrector
+remains available through its existing workflow.
+
 ## COAP: Contrastive Observation Action Pretraining
 
 COAP is a separate two-tower observation–action compatibility detector. It

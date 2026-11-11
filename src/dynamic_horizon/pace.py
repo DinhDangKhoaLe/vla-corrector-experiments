@@ -101,7 +101,11 @@ class PACE:
     def __init__(self, settings):
         self.settings = {k: v for k, v in settings.items() if k not in ("artifact", "percentile")}
         payload = json.loads(Path(settings["artifact"]).read_text())
-        if payload["action_representation"] != "metaworld_delta_xyz" or payload["settings"] != settings:
+        # Artifact location is not a calibration parameter: downloaded/copied
+        # calibrations remain valid when supplied through --artifact.
+        calibrated = {k: v for k, v in payload["settings"].items() if k != "artifact"}
+        requested = {k: v for k, v in settings.items() if k != "artifact"}
+        if payload["action_representation"] != "metaworld_delta_xyz" or calibrated != requested:
             raise ValueError("PACE calibration settings do not match this run")
         self.thresholds = payload["thresholds"]
 

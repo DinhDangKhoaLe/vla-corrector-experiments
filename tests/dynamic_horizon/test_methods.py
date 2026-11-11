@@ -3,20 +3,31 @@
 Run: python -m unittest discover -s tests/dynamic_horizon -v
 """
 import unittest
+import json
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from dynamic_horizon.a3 import A3, select_draft
 from dynamic_horizon.aac import entropy_profile, select_horizon as aac_horizon
-from dynamic_horizon.autohorizon import select_horizon as attention_horizon
+from dynamic_horizon.autohorizon import AutoHorizon, select_horizon as attention_horizon
 from dynamic_horizon.bcp import ContinuationHead, clipped_objective, continuation_log_probs, efficiency_reward
-from dynamic_horizon.pace import select_horizon as pace_horizon, speed_profile
+from dynamic_horizon.pace import PACE, select_horizon as pace_horizon, speed_profile
 from dynamic_horizon.train_bcp import optimize_group
 from dynamic_horizon.types import Prediction
 
 
 class MethodTests(unittest.TestCase):
+    def test_autohorizon_reads_third_denoising_step(self):
+        class Sampler:
+            def sample(inner, *, attention_step):
+                self.assertEqual(attention_step, 2)
+                return Prediction(torch.zeros(50, 32), torch.zeros(50, 4), attention=torch.eye(50))
+
+        self.assertEqual(AutoHorizon({}).decide(Sampler(), 0).horizon, 50)
+
     def test_attention_anchors_and_full_horizon(self):
         a = torch.zeros(50, 50)
         a[:, 10] = 1
@@ -55,6 +66,19 @@ class MethodTests(unittest.TestCase):
         actions[:, 0] = np.interp(np.arange(50), [0, 10, 25, 40, 49], [.1, 1, .05, 1, 1])
         self.assertTrue(23 <= pace_horizon(actions, .1, smoothing_window=5) <= 27)
         self.assertEqual(pace_horizon(actions, 100), 50)
+
+    def test_pace_calibration_can_move_but_settings_must_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration.json"
+            settings = {"artifact": str(path), "fps": 80, "percentile": 5}
+            path.write_text(json.dumps({
+                "action_representation": "metaworld_delta_xyz",
+                "settings": {**settings, "artifact": "/previous/machine/calibration.json"},
+                "thresholds": {"0": .1},
+            }))
+            self.assertEqual(PACE(settings).thresholds, {"0": .1})
+            with self.assertRaisesRegex(ValueError, "settings"):
+                PACE({**settings, "fps": 50})
 
     def test_a3_conditioning_and_replacement(self):
         class Sampler:
@@ -113,6 +137,39 @@ class MethodTests(unittest.TestCase):
         self.assertEqual(len(result["advantages"]), 3)
         self.assertFalse(torch.equal(initial, head.output.weight))
         self.assertTrue(np.isfinite(result["loss"]))
+
+    def test_bcp_discards_all_failure_group_without_optimizer_step(self):
+        head = ContinuationHead([15, 50], context_dim=4, velocity_dim=3,
+                                action_dim=4, width=8, heads=2, layers=1)
+        optimizer = torch.optim.AdamW(head.parameters(), lr=.001)
+        initial = {key: value.clone() for key, value in head.state_dict().items()}
+        result = optimize_group(head, optimizer, [[{}]], [0, 0], {})
+        self.assertTrue(result["skipped"])
+        self.assertEqual(optimizer.state, {})
+        for key, value in head.state_dict().items():
+            torch.testing.assert_close(value, initial[key], rtol=0, atol=0)
+
+    def test_bcp_evaluation_rejects_head_with_only_failed_groups(self):
+        from dynamic_horizon.config import make_method
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "head.pt"
+            torch.save({"step": 10, "optimized_groups": 0}, path)
+            with self.assertRaisesRegex(ValueError, "resume training"):
+                make_method({"method": "bcp", "settings": {"artifact": str(path)}})
+
+    def test_checkpoint_config_accepts_legacy_and_typed_exports(self):
+        from dynamic_horizon.policy import load_checkpoint_config
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for raw in ({}, {"type": "pi05"}):
+                path.write_text(json.dumps(raw))
+                self.assertEqual(load_checkpoint_config(directory).chunk_size, 50)
+            path.write_text(json.dumps({"type": "pi0"}))
+            with self.assertRaisesRegex(ValueError, "π0.5"):
+                load_checkpoint_config(directory)
+            path.write_text(json.dumps({"unknown_setting": 1}))
+            with self.assertRaises(Exception):
+                load_checkpoint_config(directory)
 
 
 if __name__ == "__main__":

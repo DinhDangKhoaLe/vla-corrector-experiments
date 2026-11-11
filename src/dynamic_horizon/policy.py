@@ -3,6 +3,7 @@
 Keeps one observation-prefix KV cache per decision, while each candidate or
 verification uses fresh noise. No changes to the existing corrector or policy.
 """
+import json
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,19 @@ import torch
 from safetensors import safe_open
 
 from .types import Prediction
+
+
+def load_checkpoint_config(checkpoint):
+    """Accept typed exports and legacy compatibility views without a type tag."""
+    import draccus
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+
+    raw = json.loads((Path(checkpoint) / "config.json").read_text())
+    if raw.pop("type", "pi05") != "pi05":
+        raise ValueError("Expected a π0.5 checkpoint configuration")
+    # Decode the concrete class so legacy views need no on-disk repair. Unknown
+    # fields still fail; the strict tensor-key/shape check follows before inference.
+    return draccus.decode(PI05Config, raw)
 
 
 class SentencePieceTokenizer:
@@ -39,8 +53,6 @@ class SentencePieceTokenizer:
 
 class Pi05Sampler:
     def __init__(self, settings):
-        from lerobot.policies.pi05.configuration_pi05 import PI05Config
-        from lerobot.configs.policies import PreTrainedConfig
         from lerobot.policies.pi05.modeling_pi05 import PI05Policy
         from lerobot.policies.factory import make_pre_post_processors
 
@@ -49,11 +61,9 @@ class Pi05Sampler:
         if not weights.is_file():
             raise FileNotFoundError(weights)
         if settings["device"].startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("CUDA is unavailable; check the LACO PyTorch/CUDA environment")
+            raise RuntimeError("CUDA is unavailable; check the active PyTorch/CUDA environment")
         print(f"Loading frozen π0.5 from {checkpoint} ({settings['dtype']})", flush=True)
-        config = PreTrainedConfig.from_pretrained(str(checkpoint))
-        if not isinstance(config, PI05Config):
-            raise ValueError("Expected a π0.5 checkpoint configuration")
+        config = load_checkpoint_config(checkpoint)
         if config.chunk_size != 50 or config.output_features["action"].shape[0] != 4:
             raise ValueError("Expected the downloaded MetaWorld π0.5 checkpoint: H=50, action_dim=4")
         config.device = "cpu"

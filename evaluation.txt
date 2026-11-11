@@ -1,9 +1,11 @@
 Dynamic horizon evaluation — MetaWorld / downloaded π0.5
 Run from the repository root after the setup in training.txt.
 
-    conda activate LACO
+    conda activate lerobot-dynamicVLA
     export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
     export MUJOCO_GL=egl
+
+Use conda activate LACO instead on the previous machine.
 
 Each config predicts 50 actions and allows a maximum execution horizon of 50.
 The method chooses the actual prefix at each query. Defaults: base seed 1000,
@@ -45,6 +47,8 @@ multiple denoising samples per observation, which are logged separately from
 observation queries. Serial sampling saves GPU memory; published parallel
 throughput claims do not apply to this implementation.
 
-These configs use bfloat16 for the local 16 GB GPU. Change policy.dtype to
-float32 only on a sufficiently large GPU, and retrain BCP with the same setting.
+These configs retain the bfloat16 comparison setting from the previous 16 GB
+machine. The current Quadro RTX 8000 has 48 GB and uses emulated bfloat16.
+For float32, change policy.dtype consistently in all five configs and retrain
+BCP with that setting; do not mix precisions when comparing results.
 The existing VLA-Corrector implementation and its configs are unchanged.

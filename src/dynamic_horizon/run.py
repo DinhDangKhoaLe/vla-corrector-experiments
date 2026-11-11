@@ -45,6 +45,11 @@ def main():
         for path in required:
             if not path.is_file():
                 raise FileNotFoundError(path)
+        from .policy import load_checkpoint_config, SentencePieceTokenizer
+        checkpoint_config = load_checkpoint_config(config["policy"]["checkpoint"])
+        if checkpoint_config.chunk_size != 50 or checkpoint_config.output_features["action"].shape[0] != 4:
+            raise ValueError("Expected a MetaWorld π0.5 checkpoint with H=50 and action_dim=4")
+        SentencePieceTokenizer(config["policy"]["tokenizer_model"])
         print(json.dumps({"config": config, "tasks": task_names(config["evaluation"]["tasks"]),
                           "note": "Paths/config checked; this does not execute policy inference."}, indent=2))
         return

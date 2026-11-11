@@ -48,7 +48,7 @@ class AutoHorizon:
         self.settings = settings
 
     def decide(self, sampler, task, **kwargs):
-        prediction = sampler.sample(attention_step=self.settings.get("attention_step", 3))
+        prediction = sampler.sample(attention_step=self.settings.get("attention_step", 2))
         horizon = select_horizon(prediction.attention, **{
             k: v for k, v in self.settings.items() if k != "attention_step"
         })
