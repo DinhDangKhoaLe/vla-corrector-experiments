@@ -1,0 +1,26 @@
+# MetaWorld adaptation; provenance and differences: docs/dynamic_horizon_sources.md
+method: pace
+dataset: datasets/metaworld_mt50
+policy:
+  checkpoint: pretrained_weights/pi05_metaworld_compat
+  tokenizer_model: ~/.cache/openpi/big_vision/paligemma_tokenizer.model
+  device: cuda
+  dtype: bfloat16  # fits the local 16 GB GPU; use float32 on a sufficiently large GPU
+  denoising_steps: 10
+evaluation:
+  seed: 1000
+  tasks: easy,medium,hard,very_hard
+  episodes_per_task: 20
+  episode_length: 300
+  prediction_horizon: 50
+  max_execution_horizon: 50
+  camera: corner2
+  output: outputs/dynamic_horizon/pace/evaluation_seed1000
+settings:
+  artifact: outputs/dynamic_horizon/pace/calibration.json
+  percentile: 5.0
+  min_distance: 10
+  fps: 80.0
+  delta_scale: 0.01
+  smoothing_window: 11
+  polynomial_order: 3

@@ -1,0 +1,50 @@
+Dynamic horizon evaluation — MetaWorld / downloaded π0.5
+Run from the repository root after the setup in training.txt.
+
+    conda activate LACO
+    export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+    export MUJOCO_GL=egl
+
+Each config predicts 50 actions and allows a maximum execution horizon of 50.
+The method chooses the actual prefix at each query. Defaults: base seed 1000,
+20 episodes per task, all 50 tasks in easy/medium/hard/very_hard order, maximum
+300 control steps per episode. Episode seed = 1000 + global episode index.
+The environment is reset deterministically and policy RNG reseeded afterward.
+
+AutoHorizon:
+    python -m dynamic_horizon.run evaluate --config configs/autohorizon/metaworld_pi05.yaml
+
+AAC (20 samples per query):
+    python -m dynamic_horizon.run evaluate --config configs/aac/metaworld_pi05.yaml
+
+PACE (requires calibration from training.txt):
+    python -m dynamic_horizon.run evaluate --config configs/pace/metaworld_pi05_official.yaml
+
+A³ (8 draft samples and two conditional verification orders):
+    python -m dynamic_horizon.run evaluate --config configs/a3/metaworld_pi05.yaml
+
+BCP (requires trained continuation head from training.txt):
+    python -m dynamic_horizon.run evaluate --config configs/bcp/metaworld_pi05.yaml
+
+Small real-policy run before a full benchmark (example):
+    python -m dynamic_horizon.run evaluate --config configs/autohorizon/metaworld_pi05.yaml --tasks reach-v3 --episodes 1 --episode-length 100 --output outputs/dynamic_horizon/autohorizon/quick_check
+
+The same overrides work for every method. Use --artifact PATH for a different
+PACE calibration or trained BCP checkpoint. The artifact's settings must match.
+Outputs must use a new directory; existing runs are never silently overwritten.
+
+Each evaluation produces:
+    resolved_config.json         exact resolved configuration
+    episodes.jsonl               seeds, physical reset fingerprints, success,
+                                selected/executed horizons and inference counts
+    episode_XXXX_queries.jsonl   per-query horizons, method diagnostics, timing
+    summary.json                complete/failed status and per-task success rates
+
+Do not count incomplete/failed runs as completed evaluations. A³ and AAC use
+multiple denoising samples per observation, which are logged separately from
+observation queries. Serial sampling saves GPU memory; published parallel
+throughput claims do not apply to this implementation.
+
+These configs use bfloat16 for the local 16 GB GPU. Change policy.dtype to
+float32 only on a sufficiently large GPU, and retrain BCP with the same setting.
+The existing VLA-Corrector implementation and its configs are unchanged.

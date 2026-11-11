@@ -1,0 +1,23 @@
+# MetaWorld adaptation; provenance and differences: docs/dynamic_horizon_sources.md
+method: autohorizon
+dataset: datasets/metaworld_mt50
+policy:
+  checkpoint: pretrained_weights/pi05_metaworld_compat
+  tokenizer_model: ~/.cache/openpi/big_vision/paligemma_tokenizer.model
+  device: cuda
+  dtype: bfloat16  # fits the local 16 GB GPU; use float32 on a sufficiently large GPU
+  denoising_steps: 10
+evaluation:
+  seed: 1000
+  tasks: easy,medium,hard,very_hard
+  episodes_per_task: 20
+  episode_length: 300
+  prediction_horizon: 50
+  max_execution_horizon: 50
+  camera: corner2
+  output: outputs/dynamic_horizon/autohorizon/evaluation_seed1000
+settings:
+  attention_step: 3  # zero-based denoising step, matching released AutoHorizon
+  hold_threshold: 0.3
+  entropy_quantile: 0.9
+  run_length: 1

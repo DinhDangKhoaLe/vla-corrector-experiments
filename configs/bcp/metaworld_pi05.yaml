@@ -1,0 +1,43 @@
+# MetaWorld adaptation; provenance and differences: docs/dynamic_horizon_sources.md
+method: bcp
+dataset: datasets/metaworld_mt50
+policy:
+  checkpoint: pretrained_weights/pi05_metaworld_compat
+  tokenizer_model: ~/.cache/openpi/big_vision/paligemma_tokenizer.model
+  device: cuda
+  dtype: bfloat16  # fits the local 16 GB GPU; use float32 on a sufficiently large GPU
+  denoising_steps: 10
+evaluation:
+  seed: 1000
+  tasks: easy,medium,hard,very_hard
+  episodes_per_task: 20
+  episode_length: 300
+  prediction_horizon: 50
+  max_execution_horizon: 50
+  camera: corner2
+  output: outputs/dynamic_horizon/bcp/evaluation_seed1000
+settings:
+  artifact: outputs/dynamic_horizon/bcp/head.pt
+  head:
+    horizons: [15, 20, 25, 30, 35, 40, 45, 50]
+    context_dim: 2048
+    velocity_dim: 1024
+    action_dim: 32
+    width: 256  # unspecified in paper; explicit implementation choice
+    layers: 2
+    heads: 8
+training:
+  seed: 100000
+  tasks: easy,medium,hard,very_hard
+  output: outputs/dynamic_horizon/bcp/training
+  steps: 300
+  group_size: 8
+  update_epochs: 2
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  gradient_clip: 1.0
+  clip_low: 0.2
+  clip_high: 0.28
+  entropy_bonus: 0.05
+  delta_plus: 0.7
+  delta_minus: 0.3

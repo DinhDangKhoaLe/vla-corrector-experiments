@@ -1,0 +1,56 @@
+Dynamic horizon methods — MetaWorld / downloaded π0.5
+Run from the repository root. See docs/dynamic_horizon_sources.md for fidelity
+notes and the differences required by MetaWorld's Cartesian delta actions.
+
+Environment (existing LACO environment):
+    conda activate LACO
+    export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+    export MUJOCO_GL=egl
+    python -m pip install sentencepiece 'mujoco==3.6.0'
+
+The checkpoint compatibility view already exists locally. Only if it is absent:
+    python scripts/make_pi05_compat.py --source pretrained_weights/pi05_metaworld --output pretrained_weights/pi05_metaworld_compat
+
+All configs use the cached OpenPI PaliGemma SentencePiece model at:
+    ~/.cache/openpi/big_vision/paligemma_tokenizer.model
+If running on a fresh machine, obtain that public OpenPI tokenizer first:
+    mkdir -p ~/.cache/openpi/big_vision
+    curl --fail --location https://storage.googleapis.com/big_vision/paligemma_tokenizer.model --output ~/.cache/openpi/big_vision/paligemma_tokenizer.model
+
+AutoHorizon: no training or calibration; frozen pretrained π0.5.
+    python -m dynamic_horizon.run check --config configs/autohorizon/metaworld_pi05.yaml
+
+AAC: no training or calibration; frozen pretrained π0.5.
+    python -m dynamic_horizon.run check --config configs/aac/metaworld_pi05.yaml
+
+A³: no training or calibration; frozen pretrained π0.5.
+    python -m dynamic_horizon.run check --config configs/a3/metaworld_pi05.yaml
+
+PACE: calibrate task thresholds from all downloaded demonstrations. This does
+not train the policy. The command refuses to overwrite an existing artifact.
+The local full-dataset calibration has already been generated; reuse it unless
+the dataset or PACE settings change. To regenerate, select a new --artifact
+path and use that same path for evaluation.
+    python -m dynamic_horizon.run calibrate --config configs/pace/metaworld_pi05_official.yaml
+
+BCP: train ONLY the continuation head with online MetaWorld GRPO rollouts.
+The offline demonstrations alone cannot supply its counterfactual success
+rewards. π0.5 remains frozen. Default: 300 updates, group size 8 (7 adaptive
+rollouts + 1 fixed-50 reference), training seed 100000, 300 steps per rollout.
+    python -m dynamic_horizon.run train --config configs/bcp/metaworld_pi05.yaml
+
+Resume interrupted BCP training from the last completed group:
+    python -m dynamic_horizon.run train --config configs/bcp/metaworld_pi05.yaml --resume
+
+The BCP method has no public author implementation at the checked source date;
+this is an implementation of its paper, with all choices exposed in YAML.
+The production BCP head must be trained before its evaluation command is used.
+A smoke head is stored separately and is NOT a benchmark-trained checkpoint.
+
+Verification:
+    python -m unittest discover -s tests/dynamic_horizon -v
+    python -m dynamic_horizon.smoke --output outputs/dynamic_horizon/my_smoke_run
+The smoke directory must be new. It loads the real checkpoint once, checks
+native sampling parity, conditioning and attention/features, calibrates PACE,
+runs all five methods in MetaWorld, and trains/resumes a short BCP smoke run.
+The 'check' commands only check paths/configuration, not inference correctness.
