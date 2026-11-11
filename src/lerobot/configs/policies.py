@@ -216,7 +216,10 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
         with open(config_file) as f:
             config = json.load(f)
 
-        config.pop("type")
+        # Some compatibility checkpoints have already removed the upstream
+        # discriminator before this second parse.  It is not a field of a
+        # concrete policy config, so accept either representation.
+        config.pop("type", None)
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
             json.dump(config, f)
             config_file = f.name

@@ -15,7 +15,10 @@ import os
 from pathlib import Path
 
 
-UNSUPPORTED = ("use_relative_actions", "relative_exclude_joints", "action_feature_names")
+# These are OpenPI/checkpoint metadata fields, not fields of this repository's
+# PI05Config dataclass.  They must be removed from the local compatibility view
+# before either the extractor or a live evaluator calls PI05Config.from_pretrained.
+UNSUPPORTED = ("type", "use_relative_actions", "relative_exclude_joints", "action_feature_names")
 
 
 def main() -> None:

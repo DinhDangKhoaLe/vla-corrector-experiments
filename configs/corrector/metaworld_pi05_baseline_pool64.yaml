@@ -1,0 +1,25 @@
+# Standalone fixed-H=50 PI0.5 control for the 8x8 Corrector experiment.
+# No Corrector, latent monitor, truncation, paired rollout, PACE or OGG is loaded.
+features:
+  action_prefix: false
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+training:
+  backend: experimental
+  cache: outputs/metaworld_mt50_pi05_latents_pool64
+  output: outputs/unused_metaworld_pi05_baseline
+  device: cuda
+evaluation:
+  policy: pretrained_weights/pi05_metaworld_compat
+  output: outputs/experiments/eval_metaworld_pi05_baseline_pool64_h50
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
+  seed: 1000
+  n_action_steps: 50
+  chunk_size: 50
+  corrector_enabled: false
+  guidance: false
+  guidance_eta: 0.0
+  reseed_policy_each_episode: true
+  save_video: true
