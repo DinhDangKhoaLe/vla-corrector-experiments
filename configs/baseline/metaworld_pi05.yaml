@@ -1,0 +1,10 @@
+policy: pretrained_weights/pi05_metaworld_compat
+tasks: easy,medium,hard,very_hard
+episode_length: 300
+episodes: 20
+seed: 1000
+chunk_size: 50
+action_horizon: 50
+device: cuda
+rename_map:
+  observation.image: observation.images.base_0_rgb

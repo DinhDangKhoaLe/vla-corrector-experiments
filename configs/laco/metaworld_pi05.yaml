@@ -38,15 +38,16 @@ calibration:
   trust_region: 0.15
   lambda_candidates: [0.01, 0.03, 0.1, 0.3]
 evaluation:
-  mode: full_laco
+  mode: LACO_adjust
   policy: pretrained_weights/pi05_metaworld_compat
   cache: outputs/laco/metaworld_transitions
   models: [outputs/laco/jacobian_seed42/best.pt]
   calibration: outputs/laco/calibration.json
-  output: outputs/laco/eval_full
-  tasks: button-press-v3
-  episodes: 5
+  output: outputs/laco/eval_adjust_h50_seed1000
+  tasks: easy,medium,hard,very_hard
+  episodes: 20
   seed: 1000
-  action_horizon: 10
-  episode_limit: 400
+  action_horizon: 50
+  chunk_size: 50
+  episode_limit: 300
   device: cuda

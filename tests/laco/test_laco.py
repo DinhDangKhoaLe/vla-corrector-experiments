@@ -49,3 +49,38 @@ def test_failed_correction_replans():
     # Simulate a following action that did not lower the residual.
     controller.mark_executed(); second = controller.step(np.array([-.2, 0., 0.]))
     assert second.mode is Mode.REPLAN
+
+
+def test_replan_mode_triggers_before_adjustment_solver():
+    controller = _controller()
+    controller.intervention = "replan"
+    controller.on_new_chunk(np.zeros(3), np.zeros((3, 4), dtype=np.float32))
+    controller.mark_executed()
+    # This mode must not require Jacobians or try a correction on a detected alarm.
+    controller._components = lambda z: (_ for _ in ()).throw(AssertionError("adjustment attempted"))
+    decision = controller.step(np.array([-.2, 0, 0]))
+    assert decision.mode is Mode.REPLAN
+    assert decision.reason == "error_triggered_replan"
+    assert len(controller.queue) == 0
+
+
+def test_libero_adjustment_preserves_rotation_and_gripper():
+    controller = _controller()
+    actions = np.tile([0., 0., 0., .2, .3, .4, .5], (3, 1)).astype(np.float32)
+    controller.on_new_chunk(np.zeros(3), actions)
+    controller.mark_executed()
+    decision = controller.step(np.array([-.2, 0., 0.]))
+    assert decision.mode is Mode.ADJUST
+    assert decision.action_queue.shape == (2, 7)
+    np.testing.assert_array_equal(decision.action_queue[:, 3:], actions[1:, 3:])
+
+
+def test_libero_extractor_configuration_uses_both_cameras():
+    from laco.extract import _args_for_dataset
+    from laco.utils import load_config
+    config = load_config("configs/laco/libero_pi05.yaml")
+    args = _args_for_dataset(config["extract"])
+    assert args.dataset_format == "libero"
+    assert args.image_key == "observation.images.image"
+    assert args.wrist_image_key == "observation.images.image2"
+    assert args.use_wrist_image

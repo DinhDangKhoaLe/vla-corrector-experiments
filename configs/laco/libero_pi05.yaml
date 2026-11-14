@@ -1,0 +1,31 @@
+# Shared LIBERO cache/model/calibration for both intervention modes.
+# pi05_libero_base ships identity action processors (empty features/stats).
+extends: metaworld_pi05.yaml
+extract:
+  dataset: datasets/libero
+  dataset_repo_id: lerobot/libero
+  dataset_format: libero
+  policy: pretrained_weights/pi05_libero_compat
+  output: outputs/laco/libero_transitions
+  image_key: observation.images.image
+  wrist_image_key: observation.images.image2
+  use_wrist_image: true
+  normalize_actions: false
+train:
+  cache: outputs/laco/libero_transitions
+  output: outputs/laco/libero_jacobian_seed42
+  action_dim: 3
+calibration:
+  cache: outputs/laco/libero_transitions
+  model: outputs/laco/libero_jacobian_seed42/best.pt
+  output: outputs/laco/libero_calibration.json
+evaluation:
+  environment: libero
+  policy: pretrained_weights/pi05_libero_compat
+  cache: outputs/laco/libero_transitions
+  models: [outputs/laco/libero_jacobian_seed42/best.pt]
+  calibration: outputs/laco/libero_calibration.json
+  output: outputs/eval/LACO_adjust_libero_h50_seed1000
+  tasks: libero_spatial,libero_object,libero_goal,libero_10
+  episode_limit: null
+  rename_map: {}

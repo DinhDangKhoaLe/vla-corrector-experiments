@@ -1,0 +1,22 @@
+features:
+  action_prefix: false
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+training:
+  backend: legacy
+  cache: outputs/libero_pi05_latents_pool64
+  output: outputs/experiments/libero_original_pool64
+evaluation:
+  environment: libero
+  policy: pretrained_weights/pi05_libero_compat
+  tasks: libero_spatial,libero_object,libero_goal,libero_10
+  rename_map: {}
+  output: outputs/eval/corrector_libero_h50_seed1000
+  episode_length: null
+  episodes: 20
+  seed: 1000
+  n_action_steps: 50
+  chunk_size: 50
+  guidance: true
+  save_video: false

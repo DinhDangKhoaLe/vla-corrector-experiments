@@ -1,0 +1,23 @@
+features:
+  action_prefix: false
+model:
+  image_token_grid_size: 8
+  horizons: [10]
+training:
+  backend: legacy
+  cache: outputs/robotwin_pi05_latents_pool64
+  output: outputs/experiments/robotwin_original_pool64
+evaluation:
+  environment: robotwin
+  # Export/conversion required: docs/robotwin_official.md.
+  policy: pretrained_weights/pi05_robotwin_official_compat
+  robotwin_root: third_party/RoboTwin
+  robotwin_task_config: demo_clean
+  robotwin_tasks: adjust_bottle
+  output: outputs/eval/corrector_robotwin_h50_seed1000
+  episodes: 20
+  seed: 1000
+  n_action_steps: 50
+  chunk_size: 50
+  guidance: true
+  save_video: false

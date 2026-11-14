@@ -32,6 +32,8 @@ def _normalizer(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def run(config: dict[str, Any]) -> dict[str, Any]:
     c = config.get("train", config)
     cache, output = Path(c["cache"]), Path(c["output"])
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"Refusing to overwrite an existing model: {output}")
     output.mkdir(parents=True, exist_ok=True)
     action_dim = int(c.get("action_dim", 3))
     z_train, a_train, y_train = _data(cache, "train", action_dim)
@@ -43,6 +45,7 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
     z_val, a_val, y_val = standardize(z_val, a_val, y_val)
     dev = device_from_config(c.get("device", "cuda"))
     spec = {"latent_dim": z_train.shape[1], "action_dim": action_dim, "hidden_dim": int(c.get("hidden_dim", 128))}
+    torch.manual_seed(int(c.get("seed", 42)))
     model = LatentJacobianModel(**spec).to(dev)
     if model.parameter_count >= 1_000_000:
         raise ValueError(f"Corrector has {model.parameter_count:,} parameters; must remain under 1M")
@@ -72,7 +75,7 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
             if stale >= patience: break
     assert best_state is not None
     artifact = {"format": "laco_jacobian_v1", "model": best_state, "model_spec": spec, "latent_mean": lm, "latent_std": ls,
-                "action_mean": am, "action_std": ass, "action_representation": "first three PI05-normalized MetaWorld action dimensions",
+                "action_mean": am, "action_std": ass, "action_representation": "first three policy-space Cartesian translation dimensions",
                 "best_validation_mse": best, "parameter_count": model.parameter_count, "config": c}
     torch.save(artifact, output / "best.pt")
     save_json(output / "metrics.json", {"best_validation_mse": best, "epochs_ran": len(history), "parameter_count": model.parameter_count, "history": history})

@@ -1,0 +1,4 @@
+extends: libero_pi05.yaml
+evaluation:
+  mode: LACO_adjust
+  output: outputs/eval/LACO_adjust_libero_h50_seed1000

@@ -1,60 +1,62 @@
-import unittest
+from dataclasses import asdict
 
 import numpy as np
+import pytest
 
-from siglip_dynamics.pace import PaceController, PaceSettings, choose_horizon, speed_profile
-
-
-class PaceTest(unittest.TestCase):
-    def setUp(self):
-        self.settings = PaceSettings(
-            max_horizon=10,
-            motion_dims=(0,),
-            smooth_window=1,
-            prominence_window=2,
-            min_separation=2,
-            percentile=5.0,
-        )
-
-    def test_earliest_prominent_valley_is_selected(self):
-        # Speeds: 3, 1, .1, 3.9, ...; the first qualifying valley is action 3.
-        actions = np.array([[0], [3], [4], [4.1], [8], [9], [10], [11], [12], [13]], dtype=np.float32)
-        horizon, details = choose_horizon(actions, threshold=0.5, settings=self.settings)
-        self.assertEqual(horizon, 3)
-        self.assertEqual(details["reason"], "valley")
-
-    def test_no_qualified_valley_uses_max_horizon(self):
-        actions = np.arange(10, dtype=np.float32)[:, None]
-        horizon, details = choose_horizon(actions, threshold=1.0, settings=self.settings)
-        self.assertEqual(horizon, 10)
-        self.assertEqual(details["reason"], "fallback_max_horizon")
-
-    def test_controller_uses_task_threshold_then_global_fallback(self):
-        controller = PaceController(
-            {
-                "format": "pace_style_v1",
-                "settings": {
-                    "max_horizon": 10,
-                    "motion_dims": [0],
-                    "smooth_window": 1,
-                    "prominence_window": 2,
-                    "min_separation": 2,
-                    "percentile": 5.0,
-                },
-                "global_threshold": 100.0,
-                "tasks": {"6": {"task_name": "Press a button", "threshold": 0.5}},
-            }
-        )
-        actions = np.array([[0], [3], [4], [4.1], [8], [9], [10], [11], [12], [13]], dtype=np.float32)
-        selected, _ = controller.select("Press a button", actions)
-        fallback, _ = controller.select("unknown", actions)
-        self.assertEqual(selected, 3)
-        self.assertEqual(fallback, 10)
-
-    def test_speed_profile_has_one_value_per_action_transition(self):
-        profile = speed_profile(np.zeros((10, 4), dtype=np.float32), self.settings)
-        self.assertEqual(profile.shape, (9,))
+from siglip_dynamics.pace import (
+    PaceController, PaceSettings, calibration_contrasts, choose_horizon, speed_profile,
+)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_joint_index_matches_official_convention():
+    # Speeds [0, 2, 4, 2, .1, 2, 4, 2, 0]. Contrast from start = 3.9.
+    positions = np.cumsum([0, 0, 2, 4, 2, .1, 2, 4, 2, 0])[:, None]
+    settings = PaceSettings(max_horizon=10, motion_dims=(0,), signal="joint", fps=1,
+                            smooth_window=1, polynomial_order=0, min_separation=2)
+    horizon, _ = choose_horizon(positions, .5, settings)
+    assert horizon == 4  # Official index convention: no +1.
+    assert speed_profile(positions, settings).shape == (9,)
+
+
+def test_delta_motion_is_not_differenced_and_gripper_is_excluded():
+    actions = np.zeros((50, 4))
+    actions[:, 0] = 1
+    actions[:, 3] = np.sin(np.arange(50))
+    settings = PaceSettings()
+    np.testing.assert_allclose(speed_profile(actions, settings), 1)
+    assert choose_horizon(actions, .1, settings)[0] == 50
+
+
+def test_multiarms_use_earliest_boundary():
+    speed = np.ones((50, 2))
+    speed[:, 0] = 2 + np.cos(np.arange(50) * 2*np.pi/20)
+    speed[:7, 1] = [1, 2, 3, 2, 1, .1, 2]
+    settings = PaceSettings(signal="delta", arm_groups=((0,), (1,)), smooth_window=1,
+                            polynomial_order=0, min_separation=2)
+    assert choose_horizon(speed, .5, settings)[0] == 5
+
+
+def test_calibration_full_episodes_and_short_skip():
+    speed = (2 + np.cos(np.arange(100) * 2*np.pi/20))[:, None]
+    settings = PaceSettings(motion_dims=(0,), smooth_window=1, polynomial_order=0, min_separation=10)
+    scores, analyzed, skipped = calibration_contrasts([speed, speed[:5]], settings)
+    assert scores and min(scores) > 0
+    assert (analyzed, skipped) == (1, 1)
+
+
+def test_no_silent_missing_task_or_old_artifact():
+    with pytest.raises(ValueError, match="Recalibrate"):
+        PaceController({"format": "pace_style_v1"})
+    controller = PaceController({"format": "pace_v2", "settings": asdict(PaceSettings()),
+                                 "tasks": {"task": {"task_name": "task", "threshold": .1}}})
+    with pytest.raises(KeyError):
+        controller.select("missing", np.ones((50, 4)))
+
+
+@pytest.mark.parametrize("cap", [50, 40, 30, 20, 10])
+def test_controller_reuses_calibration_with_smaller_execution_cap(cap):
+    controller = PaceController({"format": "pace_v2", "settings": asdict(PaceSettings()),
+                                 "tasks": {"task": {"task_name": "task", "threshold": .1}}})
+    # Constant speed has no valid valley: fallback must obey the runtime cap.
+    assert controller.select("task", np.ones((50, 4)), max_horizon=cap)[0] == cap
+    assert controller.settings.max_horizon == 50

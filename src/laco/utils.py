@@ -8,9 +8,11 @@ import numpy as np
 import torch
 
 
-def load_config(path: str | Path) -> dict[str, Any]:
+def load_config(path: str | Path, _seen: tuple[Path, ...] = ()) -> dict[str, Any]:
     """Read JSON or YAML config without silently accepting a missing file."""
     path = Path(path)
+    if path.resolve() in _seen:
+        raise ValueError(f"Cyclic config inheritance: {path}")
     if not path.is_file():
         raise FileNotFoundError(path)
     text = path.read_text(encoding="utf-8")
@@ -21,7 +23,17 @@ def load_config(path: str | Path) -> dict[str, Any]:
     except ImportError as exc:  # pragma: no cover - requirements install PyYAML
         raise RuntimeError("YAML config requested; install PyYAML or use JSON") from exc
     value = yaml.safe_load(text)
-    return value or {}
+    value = value or {}
+    parent = value.pop("extends", None)
+    if parent:
+        base = load_config(path.parent / parent, (*_seen, path.resolve()))
+        for key, item in value.items():
+            if isinstance(item, dict) and isinstance(base.get(key), dict):
+                base[key] = {**base[key], **item}
+            else:
+                base[key] = item
+        return base
+    return value
 
 
 def merge_overrides(config: dict[str, Any], overrides: list[str]) -> dict[str, Any]:

@@ -1,0 +1,16 @@
+dataset:
+  source: datasets/libero
+  format: lerobot
+  action_key: action
+calibration:
+  artifact: outputs/pace/libero_decoded_v2.json
+  episodes_per_task: 50
+pace:
+  max_horizon: 50
+  signal: delta
+  motion_dims: [0, 1, 2]
+  fps: 10.0
+  smooth_window: 11
+  polynomial_order: 3
+  min_separation: 10
+  percentile: 5.0

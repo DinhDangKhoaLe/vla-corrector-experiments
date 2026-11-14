@@ -230,6 +230,8 @@ outputs/
 
 # Dev folders
 .cache/*
+# Overleaf manuscript sources are maintained outside this code repository.
+/LACO_overleaf/
 *.stl
 *.urdf
 *.xml

@@ -1,297 +1,225 @@
-"""PACE-style training-free adaptive action-chunk execution.
+"""PACE adapter based on niejunnan25/PACE's MIT-licensed implementation.
 
-This module is deliberately independent of the VLA Corrector.  It calibrates
-one action-profile prominence threshold per task from demonstrations and, at
-test time, executes up to the earliest sufficiently prominent low-motion
-valley in a PI0.5 action chunk.  It is an implementation of the method
-described in PACE, not the authors' code: the paper does not prescribe an
-exact smoothing or prominence routine.
+Reference: https://github.com/niejunnan25/PACE/tree/main/pace/src/pace
+Joint-space selection follows the released speed-index convention. Cartesian
+delta policies use translation magnitude. Calibration and online actions use
+the same decoded units. Recalibrate old pace_style_v1 artifacts.
 """
-
 from __future__ import annotations
 
 import argparse
 import json
-import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
+from scipy.signal import find_peaks, savgol_filter
 
 
 @dataclass(frozen=True)
 class PaceSettings:
-    """Fixed PACE-style action-profile settings.
-
-    ``motion_dims`` intentionally excludes the MetaWorld gripper action.  The
-    profile therefore measures arm motion rather than gripper open/close
-    transitions.
-    """
-
     max_horizon: int = 50
     motion_dims: tuple[int, ...] = (0, 1, 2)
-    smooth_window: int = 5
-    prominence_window: int = 10
+    arm_groups: tuple[tuple[int, ...], ...] = ()
+    signal: str = "delta"
+    fps: float = 80.0
+    smooth_window: int = 11
+    polynomial_order: int = 3
     min_separation: int = 10
     percentile: float = 5.0
 
+    def __post_init__(self):
+        if self.max_horizon < 1 or self.signal not in {"joint", "delta"}:
+            raise ValueError("Invalid max_horizon or signal")
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise ValueError("fps must be positive and finite")
+        if self.smooth_window < 1 or self.smooth_window % 2 != 1:
+            raise ValueError("smooth_window must be positive and odd")
+        if not 0 <= self.polynomial_order < self.smooth_window or self.min_separation < 1:
+            raise ValueError("Invalid polynomial_order or min_separation")
+        if not 0 <= self.percentile <= 100:
+            raise ValueError("percentile must lie in [0, 100]")
+        if not self.groups or any(not g or min(g) < 0 for g in self.groups):
+            raise ValueError("Specify nonempty, nonnegative arm dimensions")
+
+    @property
+    def groups(self):
+        return self.arm_groups or (self.motion_dims,)
+
     @classmethod
-    def from_mapping(cls, values: dict[str, Any]) -> "PaceSettings":
-        allowed = {"max_horizon", "motion_dims", "smooth_window", "prominence_window", "min_separation", "percentile"}
-        unknown = set(values) - allowed
-        if unknown:
-            raise ValueError(f"Unknown pace settings: {sorted(unknown)}")
-        data = dict(values)
+    def from_mapping(cls, data):
+        data = dict(data)
         if "motion_dims" in data:
-            data["motion_dims"] = tuple(int(v) for v in data["motion_dims"])
-        obj = cls(**data)
-        if obj.max_horizon < 2 or not obj.motion_dims:
-            raise ValueError("pace.max_horizon must be >= 2 and motion_dims must not be empty")
-        if obj.smooth_window < 1 or obj.prominence_window < 1 or obj.min_separation < 1:
-            raise ValueError("PACE window and separation settings must be positive")
-        if not 0.0 <= obj.percentile <= 100.0:
-            raise ValueError("pace.percentile must lie in [0, 100]")
-        return obj
+            data["motion_dims"] = tuple(data["motion_dims"])
+        if "arm_groups" in data:
+            data["arm_groups"] = tuple(tuple(g) for g in data["arm_groups"])
+        return cls(**data)
 
 
 @dataclass(frozen=True)
 class PaceConfig:
-    cache: Path
     source: Path
     artifact: Path
     settings: PaceSettings
-    max_windows_per_task: int = 0
+    dataset_format: str = "lerobot"
+    action_key: str = "action"
+    episodes_per_task: int = 50
+    tasks: tuple[str, ...] = ()
 
 
-def load_config(path: str | Path) -> PaceConfig:
-    path = Path(path)
-    with path.open(encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-    if not isinstance(raw, dict):
-        raise ValueError("PACE YAML must be a mapping")
-    allowed = {"dataset", "calibration", "pace"}
-    unknown = set(raw) - allowed
-    if unknown:
-        raise ValueError(f"Unknown PACE YAML sections: {sorted(unknown)}")
-    dataset = raw.get("dataset", {})
-    calibration = raw.get("calibration", {})
-    if not isinstance(dataset, dict) or not isinstance(calibration, dict) or not isinstance(raw.get("pace", {}), dict):
-        raise ValueError("dataset, calibration, and pace must be mappings")
-    if set(dataset) - {"cache", "source"}:
-        raise ValueError("dataset supports only cache and source")
-    if set(calibration) - {"artifact", "max_windows_per_task"}:
-        raise ValueError("calibration supports only artifact and max_windows_per_task")
-    if "cache" not in dataset or "source" not in dataset or "artifact" not in calibration:
-        raise ValueError("PACE YAML requires dataset.cache, dataset.source, and calibration.artifact")
-    settings = PaceSettings.from_mapping(raw.get("pace", {}))
-    return PaceConfig(
-        cache=Path(dataset["cache"]),
-        source=Path(dataset["source"]),
-        artifact=Path(calibration["artifact"]),
-        settings=settings,
-        max_windows_per_task=int(calibration.get("max_windows_per_task", 0)),
-    )
+def load_config(path):
+    raw = yaml.safe_load(Path(path).read_text())
+    if set(raw) - {"dataset", "calibration", "pace"}:
+        raise ValueError("Unexpected PACE section")
+    ds, cal = raw["dataset"], raw["calibration"]
+    cfg = PaceConfig(Path(ds["source"]), Path(cal["artifact"]),
+                     PaceSettings.from_mapping(raw.get("pace", {})),
+                     ds.get("format", "lerobot"), ds.get("action_key", "action"),
+                     int(cal.get("episodes_per_task", 50)), tuple(ds.get("tasks", [])))
+    if cfg.episodes_per_task < 1 or cfg.dataset_format not in {"lerobot", "robotwin"}:
+        raise ValueError("Invalid dataset format or episodes_per_task")
+    return cfg
 
 
-def _moving_average(values: np.ndarray, width: int) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float64)
-    if values.size == 0 or width <= 1:
-        return values.copy()
-    # Edge padding preserves the profile length and avoids zero-padding valleys.
-    left = width // 2
-    right = width - 1 - left
-    padded = np.pad(values, (left, right), mode="edge")
-    return np.convolve(padded, np.ones(width, dtype=np.float64) / float(width), mode="valid")
+def _profiles(actions, settings):
+    actions = np.asarray(actions)
+    if actions.ndim != 2 or not len(actions) or not np.isfinite(actions).all():
+        raise ValueError("Actions must be finite, nonempty [time, channels]")
+    profiles = []
+    for group in settings.groups:
+        if max(group) >= actions.shape[1]:
+            raise ValueError("Arm dimensions exceed action dimension")
+        values = actions[:, list(group)]
+        if settings.signal == "joint":
+            values = np.diff(values, axis=0) * settings.fps
+        profiles.append(np.linalg.norm(values, axis=1))
+    return profiles
 
 
-def speed_profile(actions: np.ndarray, settings: PaceSettings) -> np.ndarray:
-    """Smoothed joint-space speed between adjacent actions in a chunk."""
+def _smooth(speed, settings):
+    window = min(settings.smooth_window, (len(speed) - 1) // 2 * 2 + 1)
+    if window < max(5, settings.polynomial_order + 1):
+        return speed.copy()
+    return savgol_filter(speed, window, settings.polynomial_order)
+
+
+def speed_profile(actions, settings):
+    """First-arm profile, for diagnostics; selection evaluates every arm."""
+    return _smooth(_profiles(actions, settings)[0], settings)
+
+
+def _valleys(profile, settings):
+    if len(profile) < settings.min_separation:
+        return np.empty(0, dtype=int)
+    return find_peaks(-profile, distance=settings.min_separation)[0]
+
+
+def _contrast(profile, start, end):
+    peak = float(np.max(profile[start:end + 1]))
+    return min(peak - float(profile[start]), peak - float(profile[end]))
+
+
+def choose_horizon(actions, threshold, settings):
+    if not np.isfinite(threshold) or threshold <= 0:
+        raise ValueError("PACE threshold must be positive and finite")
     actions = np.asarray(actions, dtype=np.float64)
-    if actions.ndim != 2:
-        raise ValueError(f"Expected actions shaped [T,A], got {actions.shape}")
-    if actions.shape[0] < 2:
-        return np.empty(0, dtype=np.float64)
-    if max(settings.motion_dims) >= actions.shape[1]:
-        raise ValueError(f"motion_dims={settings.motion_dims} incompatible with action dimension {actions.shape[1]}")
-    speed = np.linalg.norm(np.diff(actions[:, list(settings.motion_dims)], axis=0), axis=1)
-    return _moving_average(speed, settings.smooth_window)
-
-
-def valley_candidates(profile: np.ndarray, settings: PaceSettings) -> list[dict[str, float | int]]:
-    """Return local speed valleys and a bounded local prominence score."""
-    profile = np.asarray(profile, dtype=np.float64)
-    candidates: list[dict[str, float | int]] = []
-    for i in range(1, max(1, profile.size - 1)):
-        if i >= profile.size - 1:
-            break
-        # Tie-break rightward so a flat valley produces at most one candidate.
-        if not (profile[i] <= profile[i - 1] and profile[i] < profile[i + 1]):
-            continue
-        lo = max(0, i - settings.prominence_window)
-        hi = min(profile.size, i + settings.prominence_window + 1)
-        left_peak = float(np.max(profile[lo:i])) if i > lo else float(profile[i])
-        right_peak = float(np.max(profile[i + 1 : hi])) if i + 1 < hi else float(profile[i])
-        prominence = max(0.0, min(left_peak, right_peak) - float(profile[i]))
-        candidates.append({"index": int(i), "horizon": int(i + 1), "speed": float(profile[i]), "prominence": prominence})
-    return candidates
-
-
-def choose_horizon(actions: np.ndarray, threshold: float, settings: PaceSettings) -> tuple[int, dict[str, Any]]:
-    """Choose PACE's earliest qualifying valley, otherwise execute Hmax."""
-    n = min(int(np.asarray(actions).shape[0]), settings.max_horizon)
-    if n < 2:
-        return n, {"reason": "short_chunk", "candidates": []}
-    profile = speed_profile(np.asarray(actions)[:n], settings)
-    candidates = valley_candidates(profile, settings)
-    # Respect d_min while preserving PACE's earliest-boundary preference.
-    accepted: list[dict[str, float | int]] = []
-    for candidate in candidates:
-        horizon = int(candidate["horizon"])
-        if accepted and horizon - int(accepted[-1]["horizon"]) < settings.min_separation:
-            continue
-        accepted.append(candidate)
-        if float(candidate["prominence"]) >= threshold:
-            return horizon, {
-                "reason": "valley",
-                "profile": profile.tolist(),
-                "candidates": accepted,
-                "threshold": float(threshold),
-            }
-    return n, {"reason": "fallback_max_horizon", "profile": profile.tolist(), "candidates": accepted, "threshold": float(threshold)}
-
-
-def _episode_task_map(source: Path) -> tuple[dict[int, int], dict[int, str]]:
-    try:
-        import pyarrow.parquet as pq
-    except ImportError as exc:  # pragma: no cover - supplied by the project data stack
-        raise RuntimeError("PACE calibration needs pyarrow to read MetaWorld parquet metadata") from exc
-    data_dir = source / "data"
-    paths = sorted(data_dir.rglob("*.parquet"))
-    if not paths:
-        raise FileNotFoundError(f"No parquet data found under {data_dir}")
-    episode_to_task: dict[int, int] = {}
-    for path in paths:
-        table = pq.read_table(path, columns=["episode_index", "task_index"])
-        episodes = table.column("episode_index").to_numpy(zero_copy_only=False)
-        tasks = table.column("task_index").to_numpy(zero_copy_only=False)
-        for episode, task in zip(episodes, tasks, strict=True):
-            episode_i, task_i = int(episode), int(task)
-            previous = episode_to_task.setdefault(episode_i, task_i)
-            if previous != task_i:
-                raise ValueError(f"Episode {episode_i} has inconsistent task indices: {previous}, {task_i}")
-    names: dict[int, str] = {}
-    task_path = source / "meta" / "tasks.parquet"
-    if task_path.exists():
-        table = pq.read_table(task_path)
-        columns = set(table.column_names)
-        # LeRobot v3 stores the task text as the parquet's pandas index.
-        task_text_column = "task" if "task" in columns else "__index_level_0__"
-        if {"task_index", task_text_column} <= columns:
-            for task, name in zip(
-                table.column("task_index").to_numpy(zero_copy_only=False),
-                table.column(task_text_column).to_pylist(),
-                strict=True,
-            ):
-                names[int(task)] = str(name)
-    return episode_to_task, names
-
-
-def calibrate(config: PaceConfig) -> dict[str, Any]:
-    """Calibrate task thresholds from demonstrations only; no policy rollouts."""
-    cache = config.cache
-    actions_path, episodes_path = cache / "actions.npy", cache / "episode_index.npy"
-    if not actions_path.exists() or not episodes_path.exists():
-        raise FileNotFoundError(f"PACE needs actions.npy and episode_index.npy under {cache}")
-    actions = np.load(actions_path, mmap_mode="r")
-    episodes = np.load(episodes_path, mmap_mode="r")
-    if len(actions) != len(episodes):
-        raise ValueError("actions.npy and episode_index.npy have different lengths")
-    episode_to_task, task_names = _episode_task_map(config.source)
-    per_task: dict[int, list[float]] = {}
-    start = 0
-    windows_per_task: dict[int, int] = {}
-    while start < len(episodes):
-        end = start + 1
-        episode = int(episodes[start])
-        while end < len(episodes) and int(episodes[end]) == episode:
-            end += 1
-        if episode not in episode_to_task:
-            raise KeyError(f"Cache episode {episode} is missing from source parquet metadata")
-        task = episode_to_task[episode]
-        sequence = np.asarray(actions[start:end], dtype=np.float32)
-        max_start = max(0, len(sequence) - config.settings.max_horizon + 1)
-        for offset in range(max_start):
-            if config.max_windows_per_task and windows_per_task.get(task, 0) >= config.max_windows_per_task:
+    horizon = min(len(actions), settings.max_horizon)
+    events = []
+    # Official selection uses the full prediction profile even when Hmax < L.
+    for arm, speed in enumerate(_profiles(actions, settings)):
+        profile = _smooth(speed, settings)
+        for valley in _valleys(profile, settings):
+            if valley > horizon:
                 break
-            profile = speed_profile(sequence[offset : offset + config.settings.max_horizon], config.settings)
-            per_task.setdefault(task, []).extend(float(c["prominence"]) for c in valley_candidates(profile, config.settings))
-            windows_per_task[task] = windows_per_task.get(task, 0) + 1
-        start = end
-    all_scores = [score for scores in per_task.values() for score in scores]
-    if not all_scores:
-        raise ValueError("No PACE valley candidates found; verify action cache and settings")
-    global_threshold = float(np.percentile(np.asarray(all_scores), config.settings.percentile))
-    thresholds: dict[str, dict[str, Any]] = {}
-    for task, scores in sorted(per_task.items()):
-        threshold = float(np.percentile(np.asarray(scores), config.settings.percentile)) if scores else global_threshold
-        thresholds[str(task)] = {
-            "task_name": task_names.get(task, f"task_{task}"),
-            "threshold": threshold,
-            "candidate_count": len(scores),
-            "window_count": windows_per_task.get(task, 0),
-        }
-    artifact = {
-        "format": "pace_style_v1",
-        "method_note": "Training-free PACE-style reference implementation; smoothing/prominence are repository-defined.",
-        "settings": asdict(config.settings),
-        "source": {"cache": str(config.cache), "dataset": str(config.source)},
-        "global_threshold": global_threshold,
-        "tasks": thresholds,
-    }
+            score = _contrast(profile, 0, int(valley))
+            events.append({"arm": arm, "index": int(valley), "contrast": score})
+            if score >= threshold:
+                horizon = min(horizon, int(valley))
+                break
+    accepted = horizon < min(len(actions), settings.max_horizon)
+    return horizon, {"reason": "valley" if accepted else "fallback_max_horizon",
+                     "threshold": float(threshold), "candidates": events}
+
+
+def calibration_contrasts(episodes, settings):
+    """Released rule: active arm, valley-bounded full-demo segments."""
+    scores, analyzed, skipped = [], 0, 0
+    for actions in episodes:
+        if len(actions) < 20:
+            skipped += 1
+            continue
+        speeds = _profiles(actions, settings)
+        active = speeds[int(np.argmax([np.mean(s) for s in speeds]))]
+        profile = _smooth(active, settings)
+        bounds = [0, *_valleys(profile, settings), len(profile) - 1]
+        for start, end in zip(bounds[:-1], bounds[1:]):
+            if end > start:
+                score = _contrast(profile, int(start), int(end))
+                if score > 0:
+                    scores.append(score)
+        analyzed += 1
+    return scores, analyzed, skipped
+
+
+def calibrate(config):
+    from .pace_data import read_demonstrations
+    task_scores, counts = {}, {}
+    for task, actions in read_demonstrations(config):
+        if counts.get(task, 0) >= config.episodes_per_task:
+            continue
+        scores, analyzed, _ = calibration_contrasts([actions], config.settings)
+        counts[task] = counts.get(task, 0) + analyzed
+        task_scores.setdefault(task, []).extend(scores)
+    missing = [task for task, scores in task_scores.items() if not scores]
+    if missing or not task_scores:
+        raise ValueError(f"No positive PACE calibration contrasts for tasks: {missing or 'all'}")
+    tasks = {name: {"task_name": name, "threshold": float(np.percentile(scores, config.settings.percentile)),
+                    "candidate_count": len(scores), "episode_count": counts[name]}
+             for name, scores in sorted(task_scores.items())}
+    artifact = {"format": "pace_v2", "reference": "https://github.com/niejunnan25/PACE",
+                "settings": asdict(config.settings), "source": str(config.source), "tasks": tasks,
+                "global_threshold": float(np.percentile([s for scores in task_scores.values() for s in scores], config.settings.percentile))}
+    if config.artifact.exists():
+        raise FileExistsError(f"Refusing to overwrite calibration: {config.artifact}")
     config.artifact.parent.mkdir(parents=True, exist_ok=True)
-    with config.artifact.open("w", encoding="utf-8") as f:
-        json.dump(artifact, f, indent=2, sort_keys=True)
-    logging.info("PACE calibrated %d tasks from %d candidate valleys -> %s", len(thresholds), len(all_scores), config.artifact)
+    config.artifact.write_text(json.dumps(artifact, indent=2) + "\n")
     return artifact
 
 
 class PaceController:
-    """Task-threshold lookup plus action-chunk horizon selection for evaluation."""
-
     def __init__(self, artifact: dict[str, Any]):
-        if artifact.get("format") != "pace_style_v1":
-            raise ValueError("Not a pace_style_v1 calibration artifact")
-        self.settings = PaceSettings.from_mapping(dict(artifact["settings"]))
-        self.global_threshold = float(artifact["global_threshold"])
-        self.by_name = {
-            str(value.get("task_name")): float(value["threshold"])
-            for value in dict(artifact["tasks"]).values()
-        }
+        if artifact.get("format") != "pace_v2":
+            raise ValueError("Recalibrate PACE: this selector requires pace_v2 decoded-action artifacts")
+        self.settings = PaceSettings.from_mapping(artifact["settings"])
+        self.by_name = {value["task_name"]: float(value["threshold"]) for value in artifact["tasks"].values()}
 
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "PaceController":
-        config = load_config(config_path)
-        with config.artifact.open(encoding="utf-8") as f:
-            artifact = json.load(f)
+    def from_config(cls, path):
+        config = load_config(path)
+        artifact = json.loads(config.artifact.read_text())
+        if PaceSettings.from_mapping(artifact["settings"]) != config.settings:
+            raise ValueError("PACE YAML settings differ from calibration; recalibrate")
         return cls(artifact)
 
-    def select(self, task_name: str, actions: np.ndarray) -> tuple[int, dict[str, Any]]:
-        threshold = self.by_name.get(str(task_name), self.global_threshold)
-        horizon, details = choose_horizon(actions, threshold, self.settings)
-        details["task_name"] = str(task_name)
-        return horizon, details
+    def select(self, task_name, actions, *, max_horizon=None):
+        if task_name not in self.by_name:
+            raise KeyError(f"No PACE calibration for task {task_name!r}")
+        settings = self.settings
+        if max_horizon is not None:
+            if not isinstance(max_horizon, int) or not 1 <= max_horizon <= settings.max_horizon:
+                raise ValueError(f"PACE execution cap must be 1..{settings.max_horizon}")
+            settings = replace(settings, max_horizon=max_horizon)
+        return choose_horizon(actions, self.by_name[task_name], settings)
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("calibrate",))
-    parser.add_argument("--config", required=True, help="PACE YAML configuration")
+    parser.add_argument("mode", choices=["calibrate"])
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    config = load_config(args.config)
-    print(json.dumps(calibrate(config), indent=2))
+    print(json.dumps(calibrate(load_config(args.config)), indent=2))
 
 
 if __name__ == "__main__":

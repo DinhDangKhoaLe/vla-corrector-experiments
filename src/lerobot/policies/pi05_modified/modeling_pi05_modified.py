@@ -345,7 +345,10 @@ class PI05ModifiedPolicy(PI05Policy):
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        self.model.to(config.device)
+        # The inherited checkpoint loader builds parameters on meta first.
+        # It moves them to the target device after assigning saved tensors.
+        if not next(self.model.parameters()).is_meta:
+            self.model.to(config.device)
         self.reset()
 
     def set_safety_predictor(

@@ -1,4 +1,4 @@
-"""Live MetaWorld evaluation of frozen PI0.5, error replanning, and LACo."""
+"""Live MetaWorld/LIBERO evaluation of frozen PI0.5 and LACO modes."""
 from __future__ import annotations
 
 import argparse
@@ -11,13 +11,16 @@ from typing import Any
 import numpy as np
 import torch
 
-from lerobot.envs.configs import MetaworldEnv
+from lerobot.envs.configs import LiberoEnv, MetaworldEnv
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import add_envs_task, preprocess_observation
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 from lerobot.utils.constants import ACTION
+from lerobot.utils.io_utils import write_video
+from lerobot.utils.episode_progress import episode_progress
+from lerobot.utils.random_utils import set_seed
 
 from .artifacts import model_ensemble
 from .controller import Decision, LACoController, Mode
@@ -52,18 +55,32 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def run(config: dict[str, Any]) -> dict[str, Any]:
     c = config.get("evaluation", config)
-    mode = str(c.get("mode", "full_laco"))
-    if mode not in {"baseline", "replan", "laco", "full_laco"}: raise ValueError("mode must be baseline/replan/laco/full_laco")
-    output = Path(c["output"]); output.mkdir(parents=True, exist_ok=True)
+    set_seed(int(c.get("seed", 1000)))
+    mode = str(c.get("mode", "LACO_adjust"))
+    if mode not in {"baseline", "LACO_replan", "LACO_adjust"}:
+        raise ValueError("mode must be baseline/LACO_replan/LACO_adjust")
+    output = Path(c["output"])
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(f"Use a fresh evaluation.output: {output}")
+    output.mkdir(parents=True, exist_ok=True)
     pi_cfg = PI05Config.from_pretrained(c["policy"])
     pi_cfg.device = c.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     pi_cfg.n_action_steps = int(c.get("action_horizon", 10))
+    pi_cfg.chunk_size = int(c.get("chunk_size", 50))
+    if not 1 <= pi_cfg.n_action_steps <= pi_cfg.chunk_size:
+        raise ValueError("action_horizon must be between 1 and chunk_size")
     policy = PI05Policy.from_pretrained(c["policy"], config=pi_cfg).eval()
     pre, post = make_pre_post_processors(policy_cfg=pi_cfg, pretrained_path=c["policy"], preprocessor_overrides={
         "device_processor": {"device": str(pi_cfg.device)},
         "rename_observations_processor": {"rename_map": c.get("rename_map", {"observation.image": "observation.images.base_0_rgb"})},
     })
-    env_cfg = MetaworldEnv(task=str(c["tasks"]), episode_length=int(c.get("episode_limit", 400)))
+    environment = c.get("environment", "metaworld")
+    if environment == "libero":
+        env_cfg = LiberoEnv(task=str(c["tasks"]), episode_length=c.get("episode_limit"), max_parallel_tasks=1)
+    elif environment == "metaworld":
+        env_cfg = MetaworldEnv(task=str(c["tasks"]), episode_length=int(c.get("episode_limit", 400)), max_parallel_tasks=1)
+    else:
+        raise ValueError("LACO environment must be metaworld or libero")
     envs = make_env(env_cfg, n_envs=1)
     # Each entry is a distinct task environment; this preserves identical task setup per mode.
     models = artifact = dev = calibration = None
@@ -79,6 +96,7 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
         for task_id, env in task_envs.items():
             for episode in range(int(c.get("episodes", 1))):
                 policy.reset(); obs, _ = env.reset(seed=int(c.get("seed", 1000)) + episode)
+                frames = [env.call("render")[0]] if c.get("save_video", False) else None
                 controller = None
                 if mode != "baseline":
                     assert models is not None and artifact is not None and calibration is not None and dev is not None
@@ -87,13 +105,17 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
                         trust_region=float(c.get("trust_region", .15)), regularization=float(c.get("regularization", calibration.get("regularization", .1))),
                         kappa=float(c.get("kappa", 1.0)), correction_horizon=int(c.get("correction_horizon", 2)),
                         max_failed_retries=int(c.get("max_failed_retries", 1)), condition_limit=float(c.get("condition_limit", 1e4)),
-                        use_uncertainty=(mode == "full_laco"))
-                queue = np.empty((0, 4), np.float32); policy_calls = anomalies = adjusts = replans = correction_ok = correction_fail = 0
-                t0 = time.perf_counter(); latent_s = corrector_s = 0.; success = False
-                for step in range(int(c.get("episode_limit", 400))):
+                        use_uncertainty=False, intervention="replan" if mode == "LACO_replan" else "adjust")
+                action_dim = int(pi_cfg.output_features[ACTION].shape[0])
+                queue = np.empty((0, action_dim), np.float32); policy_calls = anomalies = adjusts = replans = correction_ok = correction_fail = 0
+                t0 = time.perf_counter(); latent_s = corrector_s = policy_s = 0.; success = False
+                episode_limit = int(c.get("episode_limit") or env.call("_max_episode_steps")[0])
+                progress = episode_progress(episode_limit, f"{group}:{task_id} ep={episode + 1}/{c.get('episodes', 1)}")
+                for step in range(episode_limit):
                     model_input = _input(obs, env, env_pre, pre)
                     if not len(queue):
                         start = time.perf_counter(); chunk = policy.predict_action_chunk(model_input)[0, :int(pi_cfg.n_action_steps)].detach().cpu().numpy(); policy_calls += 1
+                        policy_s += time.perf_counter() - start
                         if controller is not None:
                             ls = time.perf_counter(); z = _latent(policy, model_input, pca); latent_s += time.perf_counter()-ls; controller.on_new_chunk(z, chunk)
                         queue = chunk.copy()
@@ -102,6 +124,8 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
                     action_tensor = torch.as_tensor(action[None], dtype=torch.float32, device=pi_cfg.device)
                     env_action = env_post({ACTION: post(action_tensor)})[ACTION].cpu().numpy()
                     obs, _reward, terminated, truncated, info = env.step(env_action)
+                    if frames is not None:
+                        frames.append(env.call("render")[0])
                     queue = queue[1:]
                     decision = None
                     if controller is not None:
@@ -109,13 +133,6 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
                         ls = time.perf_counter(); z = _latent(policy, model_input_next, pca); latent_s += time.perf_counter()-ls
                         cs = time.perf_counter(); decision = controller.step(z); corrector_s += time.perf_counter()-cs
                         queue = controller.queue.copy()
-                        if mode == "replan" and decision.mode == Mode.ADJUST:
-                            # Same calibrated detector, deliberately no local intervention.
-                            controller.queue = np.empty((0, queue.shape[1]), dtype=np.float32)
-                            queue = controller.queue
-                            decision = Decision(Mode.REPLAN, None, decision.prediction_error, decision.filtered_error,
-                                                decision.controllability, decision.predicted_gain, decision.gain_lcb,
-                                                decision.uncertainty, "error_triggered_replan", decision.correction_success)
                         anomalies += int(decision.filtered_error > controller.threshold)
                         adjusts += int(decision.mode == Mode.ADJUST); replans += int(decision.mode == Mode.REPLAN)
                         correction_ok += int(decision.correction_success is True); correction_fail += int(decision.correction_success is False)
@@ -124,19 +141,32 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
                                       "threshold": controller.threshold if controller else "", "rho": decision.controllability if decision else "", "gain": decision.predicted_gain if decision else "",
                                       "gain_lcb": decision.gain_lcb if decision else "", "uncertainty": decision.uncertainty if decision else "",
                                       "correction_success": decision.correction_success if decision else "", "reason": decision.reason if decision else ""})
-                    success = _success(info)
+                    success = success or _success(info)
+                    progress.set_postfix({"calls": policy_calls, "ok": f"{100 * int(success)}%"}, refresh=False)
+                    progress.update(1)
                     if bool(np.asarray(terminated).reshape(-1)[0]) or bool(np.asarray(truncated).reshape(-1)[0]): break
+                progress.close()
+                if frames is not None:
+                    video = output / "videos" / f"{group}_{task_id}" / f"episode_{episode:03d}.mp4"
+                    video.parent.mkdir(parents=True, exist_ok=True)
+                    write_video(str(video), np.stack(frames), env.unwrapped.metadata.get("render_fps", env_cfg.fps))
                 episode_rows.append({"task_group": group, "task_id": task_id, "episode": episode, "success": success, "steps": step+1,
                                      "policy_calls": policy_calls, "anomalies": anomalies, "adjustments": adjusts, "replans": replans, "interventions": adjusts + replans,
                                      "correction_successes": correction_ok, "correction_failures": correction_fail, "latent_seconds": latent_s,
+                                     "policy_seconds": policy_s,
                                      "corrector_seconds": corrector_s, "episode_seconds": time.perf_counter()-t0})
-    env.close(); _write_csv(output / "steps.csv", step_rows); _write_csv(output / "episodes.csv", episode_rows)
+    for task_envs in envs.values():
+        for task_env in task_envs.values():
+            task_env.close()
+    _write_csv(output / "steps.csv", step_rows); _write_csv(output / "episodes.csv", episode_rows)
     successful = [r for r in episode_rows if r["success"]]
     summary = {"mode": mode, "episodes": len(episode_rows), "success_rate": float(np.mean([r["success"] for r in episode_rows])),
                "mean_policy_calls": float(np.mean([r["policy_calls"] for r in episode_rows])), "mean_anomalies": float(np.mean([r["anomalies"] for r in episode_rows])),
                "mean_adjustments": float(np.mean([r["adjustments"] for r in episode_rows])), "mean_replans": float(np.mean([r["replans"] for r in episode_rows])),
                "total_latent_seconds": float(sum(r["latent_seconds"] for r in episode_rows)), "total_corrector_seconds": float(sum(r["corrector_seconds"] for r in episode_rows)),
                "total_episode_seconds": float(sum(r["episode_seconds"] for r in episode_rows)),
+               "mean_policy_call_seconds": sum(r["policy_seconds"] for r in episode_rows) / max(1, sum(r["policy_calls"] for r in episode_rows)),
+               "avg_executed_actions": sum(r["steps"] for r in episode_rows) / max(1, sum(r["policy_calls"] for r in episode_rows)),
                # A proxy only: environment success is never exposed to LACo.
                "successful_episode_interventions_per_step_proxy": float(sum(r["interventions"] for r in successful) / max(1, sum(r["steps"] for r in successful)))}
     save_json(output / "summary.json", summary); return summary

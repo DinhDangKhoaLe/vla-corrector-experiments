@@ -15,6 +15,7 @@ import logging
 import os
 import random
 import sys
+import time
 from collections import deque
 from dataclasses import fields
 from pathlib import Path
@@ -76,6 +77,7 @@ def _policy_stack(cfg):
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import make_pre_post_processors
     from lerobot.policies.pi05.configuration_pi05 import PI05Config
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from lerobot.policies.pi05_modified.configuration_pi05_modified import PI05ModifiedConfig
     from lerobot.policies.pi05_modified.modeling_pi05_modified import PI05ModifiedPolicy
 
@@ -89,9 +91,12 @@ def _policy_stack(cfg):
     values["n_action_steps"] = int(cfg.evaluation.n_action_steps)
     values["chunk_size"] = int(cfg.evaluation.chunk_size)
     values["device"] = str(cfg.training.device)
-    modified = PI05ModifiedConfig(**values)
+    values["compile_model"] = False
+    enabled = cfg.evaluation.robotwin_corrector_enabled
+    modified = PI05ModifiedConfig(**values) if enabled else PI05Config(**values)
     modified.pretrained_path = policy_path
-    policy = PI05ModifiedPolicy.from_pretrained(str(policy_path), config=modified).eval()
+    policy_cls = PI05ModifiedPolicy if enabled else PI05Policy
+    policy = policy_cls.from_pretrained(str(policy_path), config=modified).eval()
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=modified,
         pretrained_path=policy_path,
@@ -228,10 +233,15 @@ def _legacy_threshold_state(cfg):
 
 def _run_one(
     *, env, policy, preprocessor, postprocessor, monitor, cfg, instruction: str, task: str, seed: int,
-    video_path: Path | None,
+    video_path: Path | None, predictor=None, pace=None,
 ) -> dict[str, Any]:
     policy.reset()
-    if monitor is not None:
+    enabled = cfg.evaluation.robotwin_corrector_enabled
+    legacy_events = []
+    if not enabled:
+        if monitor is not None:
+            raise ValueError("Baseline/PACE cannot use a Corrector monitor")
+    elif monitor is not None:
         monitor.reset(task, seed)
     else:
         # Import the shared cosine residual / threshold transition rather than
@@ -247,17 +257,23 @@ def _run_one(
     executed = 0
     replans = 0
     ogg_replans = 0
+    policy_calls = 0
+    policy_seconds = 0.0
     episode_error = ""
     # Set after a legacy alarm and consumed by the next (forced) PI0.5 call.
     guidance_replan = False
     guidance_current_z_t = None
     guidance_current_delta_z_t = None
     guidance_current_delta_z_right = None
+    z_cached = None
+    if enabled and monitor is None and predictor is None:
+        raise ValueError("Native Corrector rollout requires its predictor")
     try:
         while not env.eval_success and env.take_action_cnt < env.step_lim:
             model_input = _model_input(obs, instruction, preprocessor)
-            z_now = _latent(policy, model_input)
+            z_now = (z_cached if z_cached is not None else _latent(policy, model_input)) if enabled else None
             if not queue:
+                infer_start = time.perf_counter()
                 response = policy.predict_action_chunk_with_aux(
                     model_input,
                     guidance_replan=guidance_replan,
@@ -268,21 +284,27 @@ def _run_one(
                     guidance_apply_every=int(cfg.evaluation.guidance_apply_every),
                     guidance_loss_objective="attract_delta_z_correction",
                     guidance_compare_baseline=False,
-                )
+                ) if enabled else {"actions": policy.predict_action_chunk(model_input)}
+                policy_seconds += time.perf_counter() - infer_start
+                policy_calls += 1
                 if guidance_replan:
                     ogg_replans += 1
                 guidance_replan = False
                 guidance_current_z_t = None
                 guidance_current_delta_z_t = None
                 guidance_current_delta_z_right = None
-                normalized = response["actions"][0, : cfg.evaluation.n_action_steps].detach().to("cpu").numpy()
-                native = _env_actions(postprocessor, response["actions"][:, : cfg.evaluation.n_action_steps])
+                available = response["actions"] if pace is not None else response["actions"][:, : cfg.evaluation.n_action_steps]
+                normalized = available[0].detach().to("cpu").numpy()
+                native = _env_actions(postprocessor, available)
+                if pace is not None:
+                    horizon, _ = pace.select(task, native, max_horizon=int(cfg.evaluation.n_action_steps))
+                    native, normalized = native[:horizon], normalized[:horizon]
                 for raw_action, model_action in zip(native, normalized, strict=True):
                     queue.append((raw_action, model_action.astype(np.float32, copy=False)))
                 if monitor is not None:
                     monitor.schedule(z_now, [entry[1] for entry in queue], executed)
             raw_action, model_action = queue.popleft()
-            if monitor is None:
+            if enabled and monitor is None:
                 # Match the original VLA-Corrector schedule: each executed
                 # action receives a K-step forecast from its own current latent.
                 prediction = predictor.predict_delta_z(z_now, model_action)
@@ -293,8 +315,9 @@ def _run_one(
             env.take_action(raw_action, action_type="qpos")
             executed += 1
             obs = env.get_obs()
-            z_after = _latent(policy, _model_input(obs, instruction, preprocessor))
-            if monitor is not None:
+            z_after = _latent(policy, _model_input(obs, instruction, preprocessor)) if enabled else None
+            z_cached = z_after
+            if enabled and monitor is not None:
                 event = monitor.observe(z_after, executed)
                 if event is not None:
                     replan, ogg = monitor.recovery_decision(event, executed)
@@ -312,7 +335,7 @@ def _run_one(
                             guidance_current_delta_z_right = event["prediction"]
                             predictor.model.guidance_horizon = int(event["horizon"])
                         replans += 1
-            elif legacy_pending and legacy_pending[0]["due"] == executed:
+            elif enabled and legacy_pending and legacy_pending[0]["due"] == executed:
                 pending = legacy_pending.popleft()
                 actual = z_after - pending["start"]
                 e_t = cosine_error(pending["prediction"], actual)
@@ -341,6 +364,7 @@ def _run_one(
     if monitor is not None:
         monitor.finish(success, episode_error)
     return {"task": task, "seed": seed, "success": success, "steps": executed,
+            "policy_calls": policy_calls, "policy_seconds": policy_seconds,
             "replans": replans, "ogg_replans": ogg_replans, "error": episode_error,
             "legacy_events": legacy_events if monitor is None else []}
 
@@ -364,6 +388,8 @@ def evaluate_robotwin(cfg, *, mode: str, config_path: Path) -> None:
     cfg.evaluation.policy = absolute(cfg.evaluation.policy)
     cfg.evaluation.output = absolute(cfg.evaluation.output)
     cfg.evaluation.robotwin_root = absolute(cfg.evaluation.robotwin_root)
+    if cfg.evaluation.pace_config:
+        cfg.evaluation.pace_config = absolute(cfg.evaluation.pace_config)
     if cfg.evaluation.checkpoint:
         cfg.evaluation.checkpoint = absolute(cfg.evaluation.checkpoint)
     cfg.uncertainty.traces = absolute(cfg.uncertainty.traces)
@@ -384,19 +410,28 @@ def evaluate_robotwin(cfg, *, mode: str, config_path: Path) -> None:
         output.mkdir(parents=True)
         (output / "resolved_experiment.yaml").write_text(yaml.safe_dump(cfg.to_dict(), sort_keys=False))
         policy, preprocessor, postprocessor = _policy_stack(cfg)
-        checkpoint = Path(cfg.evaluation.checkpoint or Path(cfg.training.output) / "best_model.pt")
-        predictor = ExperimentPredictor(checkpoint, cfg, cfg.training.device)
+        default_name = "h1_k10" if cfg.training.backend == "legacy" else "best_model.pt"
+        checkpoint = Path(cfg.evaluation.checkpoint or Path(cfg.training.output) / default_name)
+        enabled = cfg.evaluation.robotwin_corrector_enabled
+        predictor = ExperimentPredictor(checkpoint, cfg, cfg.training.device) if enabled else None
+        pace = None
+        if cfg.evaluation.pace_config:
+            from siglip_dynamics.pace import PaceController
+            if enabled:
+                raise ValueError("Run RoboTwin PACE separately from Corrector")
+            pace = PaceController.from_config(cfg.evaluation.pace_config)
         # OGG is a policy-side gradient step.  Register the same Corrector used
         # by the alarm before any rollout; otherwise ``guidance_replan=True``
         # would silently sample an ordinary PI0.5 chunk.
-        if cfg.evaluation.guidance and cfg.evaluation.guidance_eta > 0:
+        if enabled:
+            # Register even when OGG is off: this also supplies 8x8 latent pooling.
             policy.set_safety_predictor(
                 predictor.model,
                 action_dim=int(predictor.action_dim),
                 model_type=str(getattr(predictor, "model_type", "mlp")),
-                eta=float(cfg.evaluation.guidance_eta),
+                eta=float(cfg.evaluation.guidance_eta) if cfg.evaluation.guidance else 0.0,
             )
-        monitor = _make_monitor(cfg, predictor, mode, output)
+        monitor = _make_monitor(cfg, predictor, mode, output) if enabled else None
         records: list[dict[str, Any]] = []
         videos = output / "videos"
         if cfg.evaluation.save_video:
@@ -423,7 +458,7 @@ def evaluate_robotwin(cfg, *, mode: str, config_path: Path) -> None:
                             candidate += 1
                             continue
                     env.setup_demo(now_ep_num=accepted, seed=candidate, is_test=True, **task_args)
-                except unstable_error:
+                except (unstable_error, AssertionError):
                     _close(env)
                     candidate += 1
                     continue
@@ -432,7 +467,7 @@ def evaluate_robotwin(cfg, *, mode: str, config_path: Path) -> None:
                 video = videos / f"{task}_ep{accepted:03d}_{candidate}.mp4" if cfg.evaluation.save_video else None
                 result = _run_one(env=env, policy=policy, preprocessor=preprocessor, postprocessor=postprocessor,
                                   monitor=monitor, cfg=cfg, instruction=instruction, task=task, seed=candidate,
-                                  video_path=video)
+                                  video_path=video, predictor=predictor, pace=pace)
                 records.append(result)
                 logging.info("RoboTwin %s | task=%s ep=%d seed=%d success=%s steps=%d replans=%d", mode, task,
                              accepted, candidate, result["success"], result["steps"], result["replans"])
@@ -440,10 +475,13 @@ def evaluate_robotwin(cfg, *, mode: str, config_path: Path) -> None:
                 accepted += 1
                 candidate += 1
         with open(output / "episode_summary.csv", "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["task", "seed", "success", "steps", "replans", "ogg_replans", "error"])
+            writer = csv.DictWriter(handle, fieldnames=["task", "seed", "success", "steps", "policy_calls", "policy_seconds", "replans", "ogg_replans", "error"], extrasaction="ignore")
             writer.writeheader()
             writer.writerows(records)
-        summary = {"mode": mode, "episodes": len(records), "successes": sum(r["success"] for r in records),
+        summary = {"mode": mode, "corrector_enabled": enabled, "pace_enabled": pace is not None,
+                   "episodes": len(records), "successes": sum(r["success"] for r in records),
+                   "mean_policy_calls": float(np.mean([r["policy_calls"] for r in records])) if records else 0.,
+                   "avg_executed_actions": sum(r["steps"] for r in records) / max(1, sum(r["policy_calls"] for r in records)),
                    "success_rate": float(np.mean([r["success"] for r in records])) if records else 0.0}
         (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         logging.info("RoboTwin %s complete: %s", mode, summary)

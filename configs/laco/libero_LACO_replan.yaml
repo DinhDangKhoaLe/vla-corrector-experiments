@@ -1,0 +1,4 @@
+extends: libero_pi05.yaml
+evaluation:
+  mode: LACO_replan
+  output: outputs/eval/LACO_replan_libero_h50_seed1000

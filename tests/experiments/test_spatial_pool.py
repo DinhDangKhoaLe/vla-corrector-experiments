@@ -82,21 +82,12 @@ class SpatialPoolTests(unittest.TestCase):
         np.testing.assert_array_equal(full, torch.cat(cameras, 1)[0].numpy())
 
     def test_cache_and_config_isolation(self):
-        for name in ("original", "prefix", "uncertainty"):
-            cfg = load_config(f"configs/corrector/metaworld_{name}_pool4.yaml")
-            self.assertEqual(cfg.model.image_token_grid_size, 4)
-            self.assertIn("pool4", cfg.training.cache)
-            self.assertIn("pool4", cfg.training.output)
-            self.assertIn("pool4", cfg.evaluation.output)
-            self.assertIn("--policy.n_action_steps=10", eval_command(cfg, "evaluate", "resolved.yaml"))
-            rect = load_config(f"configs/corrector/metaworld_{name}_pool32.yaml")
-            self.assertEqual(rect.model.image_token_grid_size, 0)
-            self.assertEqual(rect.model.image_token_grid_shape, [4, 8])
-            self.assertIn("pool32", rect.training.cache)
-            self.assertIn("pool32", rect.training.output)
-            self.assertIn("pool32", rect.evaluation.output)
-        for name in ("baseline", "prefix", "uncertainty"):
-            self.assertEqual(load_config(f"configs/corrector/{name}.yaml").model.image_token_grid_size, 0)
+        for benchmark in ("metaworld", "libero", "robotwin"):
+            cfg = load_config(f"configs/corrector/{benchmark}_original_pool64.yaml")
+            self.assertEqual(cfg.model.image_token_grid_size, 8)
+            self.assertIn("pool64", cfg.training.cache)
+            self.assertIn("pool64", cfg.training.output)
+            self.assertEqual(cfg.evaluation.n_action_steps, 50)
         with self.assertRaisesRegex(ValueError, "Cache image_token_grid_size"):
             validate_cache_grid({"image_token_grid_size": 0}, 4)
         with self.assertRaisesRegex(ValueError, "expected 16"):

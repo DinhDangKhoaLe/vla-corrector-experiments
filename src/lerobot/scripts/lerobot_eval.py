@@ -68,6 +68,7 @@ import torch
 from termcolor import colored
 from torch import Tensor, nn
 from tqdm import trange
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
@@ -86,6 +87,7 @@ from lerobot.utils.constants import ACTION, DONE, OBS_STR, REWARD
 from lerobot.utils.device_utils import get_safe_torch_device
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.io_utils import write_video
+from lerobot.utils.episode_progress import episode_progress
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import (
     init_logging,
@@ -149,6 +151,7 @@ def rollout(
     return_observations: bool = False,
     render_callback: Callable[[gym.vector.VectorEnv], None] | None = None,
     track_inference_steps: bool = False,
+    progress_description: str | None = None,
 ) -> dict:
     """Run a batched policy rollout once through a batch of environments.
 
@@ -205,12 +208,7 @@ def rollout(
     # Keep track of which environments are done.
     done = np.array([False] * env.num_envs)
     max_steps = env.call("_max_episode_steps")[0]
-    progbar = trange(
-        max_steps,
-        desc=f"Running rollout with at most {max_steps} steps",
-        disable=inside_slurm(),  # we dont want progress bar when we use slurm, since it clutters the logs
-        leave=False,
-    )
+    progbar = episode_progress(max_steps, progress_description or "Rollout", disable=inside_slurm())
     check_env_attributes_and_types(env)
     while not np.all(done) and step < max_steps:
         # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
@@ -281,9 +279,10 @@ def rollout(
         running_success_rate = (
             einops.reduce(torch.stack(all_successes, dim=1), "b n -> b", "any").numpy().mean()
         )
-        progbar.set_postfix({"running_success_rate": f"{running_success_rate.item() * 100:.1f}%"})
+        progbar.set_postfix({"ok": f"{running_success_rate.item() * 100:.0f}%"}, refresh=False)
         progbar.update()
 
+    progbar.close()
     # Track the final observation.
     if return_observations:
         observation = preprocess_observation(observation)
@@ -391,7 +390,7 @@ def eval_policy(
         episode_data: dict | None = None
 
     # we dont want progress bar when we use slurm, since it clutters the logs
-    progbar = trange(n_batches, desc="Stepping through eval batches", disable=inside_slurm())
+    progbar = trange(n_batches, disable=True)  # One visible bar per rollout, no nested batch bar.
     for batch_ix in progbar:
         # Cache frames for rendering videos. Each item will be (b, h, w, c), and the list indexes the rollout
         # step.
@@ -414,6 +413,7 @@ def eval_policy(
             seeds=list(seeds) if seeds else None,
             return_observations=return_episode_data,
             render_callback=render_frame if max_episodes_rendered > 0 else None,
+            progress_description=f"Episode {batch_ix * env.num_envs + 1}/{n_episodes}",
             track_inference_steps=True,
         )
 
@@ -645,7 +645,7 @@ def eval_main(cfg: EvalPipelineConfig):
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             n_episodes=cfg.eval.n_episodes,
-            max_episodes_rendered=10,
+            max_episodes_rendered=cfg.max_episodes_rendered,
             videos_dir=Path(cfg.output_dir) / "videos",
             start_seed=cfg.seed,
             max_parallel_tasks=cfg.env.max_parallel_tasks,
@@ -1039,7 +1039,8 @@ def eval_policy_all(
 def main():
     init_logging()
     register_third_party_plugins()
-    eval_main()
+    with logging_redirect_tqdm():
+        eval_main()
 
 
 if __name__ == "__main__":

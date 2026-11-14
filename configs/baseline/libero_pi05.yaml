@@ -1,0 +1,8 @@
+policy: pretrained_weights/pi05_libero_compat
+tasks: libero_spatial,libero_object,libero_goal,libero_10
+episodes: 20
+seed: 1000
+chunk_size: 50
+action_horizon: 50
+device: cuda
+rename_map: {}

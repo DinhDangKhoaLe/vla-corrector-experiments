@@ -40,6 +40,7 @@ class EvalPipelineConfig:
     rename_map: dict[str, str] = field(default_factory=dict)
     # Explicit consent to execute remote code from the Hub (required for hub environments).
     trust_remote_code: bool = False
+    max_episodes_rendered: int = 10
 
     def __post_init__(self) -> None:
         # HACK: We parse again the cli args here to get the pretrained path if there was one.

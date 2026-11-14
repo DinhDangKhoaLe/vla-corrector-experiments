@@ -1,13 +1,15 @@
-"""Episode-safe MetaWorld transition extraction and train-only PCA fitting."""
+"""Episode-safe MetaWorld/LIBERO transition extraction and train-only PCA."""
 from __future__ import annotations
 
 import argparse
 import json
 import zlib
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from siglip_dynamics.extract import (
     Pi05Extractor,
@@ -28,8 +30,9 @@ def _args_for_dataset(c: dict[str, Any]) -> argparse.Namespace:
     return argparse.Namespace(
         dataset_path=c["dataset"], dataset_repo_id=c.get("dataset_repo_id", "lerobot/metaworld_mt50"),
         dataset_loader=c.get("dataset_loader", "auto"), allow_dataset_download=bool(c.get("allow_dataset_download", False)),
-        video_tolerance_s=float(c.get("video_tolerance_s", 1e-4)), dataset_format="metaworld",
-        image_key=c.get("image_key", "observation.image"), wrist_image_key="", use_wrist_image=False,
+        video_tolerance_s=float(c.get("video_tolerance_s", 1e-4)), dataset_format=c.get("dataset_format", "metaworld"),
+        image_key=c.get("image_key", "observation.image"), wrist_image_key=c.get("wrist_image_key", ""),
+        use_wrist_image=bool(c.get("use_wrist_image", False)),
         extra_image_keys="", action_key=c.get("action_key", "action"),
     )
 
@@ -47,11 +50,36 @@ def _episode_and_task(item: dict[str, Any], fallback_episode: int) -> tuple[int,
     return episode, -1
 
 
+def _frame_metadata(ds: Any, args: argparse.Namespace):
+    """Read actions and episode/task identifiers without decoding any images."""
+    columns = list(dict.fromkeys([args.action_key, "action", "actions", "episode_index", "task_index", "task_id", "task"]))
+    if hasattr(ds, "iter_columns"):
+        rows = iter(ds.iter_columns(columns))
+    elif getattr(ds, "hf_dataset", None) is not None:
+        table = ds.hf_dataset
+        rows = iter(table.select_columns([key for key in columns if key in table.column_names]))
+    else:
+        rows = (ds[i] for i in range(len(ds)))
+    first = next(rows)
+    action_key = _resolve_action_key(first, args.action_key)
+    actions = np.empty((len(ds), len(_to_float_array_1d(first[action_key]))), dtype=np.float32)
+    episodes = np.empty(len(ds), dtype=np.int64)
+    tasks = np.empty(len(ds), dtype=np.int32)
+    count = 0
+    for i, row in enumerate(chain([first], rows)):
+        episodes[i], tasks[i] = _episode_and_task(row, i)
+        actions[i] = _to_float_array_1d(row[action_key])
+        count += 1
+    if count != len(ds):
+        raise ValueError(f"Metadata has {count} rows but dataset has {len(ds)} frames")
+    return episodes, tasks, actions, action_key
+
+
 def _fit_pca(extractor: Pi05Extractor, ds: Any, args: argparse.Namespace, split_by_frame: np.ndarray, dim: int, batch: int) -> tuple[np.ndarray, np.ndarray]:
     """Fit PCA from training frames only, streaming an O(D²) covariance."""
     _fmt, image_key, wrist_key, extra, wrist = _resolve_layout(ds[0], args)
     count, total, total_outer = 0, None, None
-    for start in range(0, len(ds), batch):
+    for start in tqdm(range(0, len(ds), batch), desc="LACO PCA (training episodes)"):
         ix = [i for i in range(start, min(start + batch, len(ds))) if split_by_frame[i] == "train"]
         if not ix:
             continue
@@ -83,7 +111,7 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
     if n < 2:
         raise ValueError("Dataset needs at least two frames")
     # Assign splits from all episode identifiers before fitting PCA.
-    frame_episode = np.asarray([_episode_and_task(ds[i], i)[0] for i in range(n)], dtype=np.int64)
+    frame_episode, frame_task, frame_action, action_key = _frame_metadata(ds, args)
     split_by_frame = episode_split(frame_episode, int(c.get("seed", 42)), float(c.get("val_fraction", .1)), float(c.get("calibration_fraction", .1)))
     extractor = Pi05Extractor(c["policy"], device=c.get("device", "cuda"), local_files_only=bool(c.get("local_files_only", True)))
     pca_mean, components = _fit_pca(extractor, ds, args, split_by_frame, int(c.get("pca_dim", 32)), int(c.get("batch_size", 8)))
@@ -92,14 +120,14 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
     valid = np.flatnonzero(frame_episode[:-1] == frame_episode[1:])
     z_t = np.lib.format.open_memmap(out / "z_t.npy", mode="w+", dtype=np.float32, shape=(len(valid), len(components)))
     z_next = np.lib.format.open_memmap(out / "z_next.npy", mode="w+", dtype=np.float32, shape=z_t.shape)
-    first_action = _to_float_array_1d(ds[0][_resolve_action_key(ds[0], args.action_key)])
+    first_action = frame_action[0]
     normalize_actions = bool(c.get("normalize_actions", True))
     action_stats = None
     action_stats_info: dict[str, Any] = {"mode": "raw"}
     if normalize_actions:
         action_stats, stats_source, stats_key = _load_action_quantiles_stats(
             dataset_path=str(c["dataset"]), dataset_repo_id=str(c.get("dataset_repo_id", "lerobot/metaworld_mt50")),
-            action_key=_resolve_action_key(ds[0], args.action_key), action_dim=len(first_action), encoder_policy_path=str(c["policy"]),
+            action_key=action_key, action_dim=len(first_action), encoder_policy_path=str(c["policy"]),
         )
         action_stats_info = {"mode": "quantile_q01_q99_to_-1_1", "source": stats_source, "key": stats_key}
     actions = np.lib.format.open_memmap(out / "actions.npy", mode="w+", dtype=np.float32, shape=(len(valid), len(first_action)))
@@ -111,7 +139,7 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
     # cross-boundary transitions while avoiding a second vision pass for each successor.
     reduced = np.lib.format.open_memmap(out / "frame_latents.npy", mode="w+", dtype=np.float32, shape=(n, len(components)))
     extraction_batch = int(c.get("batch_size", 8))
-    for start in range(0, n, extraction_batch):
+    for start in tqdm(range(0, n, extraction_batch), desc="LACO frame encoding"):
         end = min(start + extraction_batch, n)
         tokens = extractor.encode_items([ds[i] for i in range(start, end)], image_key=image_key, wrist_image_key=wrist_key,
                                         use_wrist_image=wrist, extra_image_keys=extra)
@@ -119,11 +147,9 @@ def run(config: dict[str, Any]) -> dict[str, Any]:
     reduced.flush()
     for offset, frame in enumerate(valid):
         z_t[offset], z_next[offset] = reduced[frame], reduced[frame + 1]
-        item = ds[int(frame)]
-        action_key = _resolve_action_key(item, args.action_key)
-        raw_action = _to_float_array_1d(item[action_key])
+        raw_action = frame_action[frame]
         actions[offset] = _normalize_action_quantiles(raw_action, action_stats) if action_stats is not None else raw_action
-        ep, task = _episode_and_task(item, int(frame))
+        ep, task = frame_episode[frame], frame_task[frame]
         episodes[offset], tasks[offset], timesteps[offset] = ep, task, int(frame)
         labels[offset] = split_by_frame[int(frame)]
     for x in (z_t, z_next, actions, episodes, tasks, timesteps):

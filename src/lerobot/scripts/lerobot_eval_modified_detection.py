@@ -16,7 +16,9 @@ import gymnasium as gym
 import imageio
 import numpy as np
 import torch
-from tqdm import trange, tqdm
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
+from lerobot.utils.episode_progress import episode_progress
 
 from lerobot import envs, policies  # noqa: F401
 from lerobot.configs import parser
@@ -974,9 +976,9 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
         raise ValueError(
             f"policy.n_action_steps ({action_queue_fill_steps}) cannot exceed policy.chunk_size ({policy.config.chunk_size})."
         )
-    if pace_controller is not None and action_queue_fill_steps != pace_controller.settings.max_horizon:
+    if pace_controller is not None and action_queue_fill_steps > pace_controller.settings.max_horizon:
         raise ValueError(
-            "PACE requires policy.n_action_steps to equal calibrated pace.max_horizon "
+            "PACE requires policy.n_action_steps <= calibrated pace.max_horizon "
             f"({pace_controller.settings.max_horizon}), got {action_queue_fill_steps}."
         )
     logging.info(
@@ -990,7 +992,7 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
     # snapshot expects the canonical base-camera key. Existing Corrector runs
     # keep their explicit rename_map unchanged; make PACE-only direct runs
     # robust to an omitted mapping.
-    if pace_controller is not None and not effective_rename_map:
+    if pace_controller is not None and cfg.env.type == "metaworld" and not effective_rename_map:
         effective_rename_map = {"observation.image": "observation.images.base_0_rgb"}
         logging.info("PACE-only MetaWorld camera mapping: observation.image -> observation.images.base_0_rgb")
     preprocessor_overrides = {
@@ -1049,7 +1051,7 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
     episode_prog = tqdm(
         total=total_episode_target,
         desc="Stepping through eval episodes",
-        disable=disable_progress,
+        disable=True,  # The rollout owns the only visible progress line.
     )
 
     try:
@@ -1077,20 +1079,16 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                 max_steps = int(env.call("_max_episode_steps")[0])
 
                 for episode_idx in range(cfg.eval.n_episodes):
-                    if not disable_progress:
-                        episode_prog.set_description(f"Eval episodes | {task_group}:{task_id}")
-                    step_prog = trange(
-                        max_steps,
-                        desc=f"Running rollout {task_group}:{task_id} ep={episode_idx}",
+                    step_prog = episode_progress(
+                        max_steps, f"{task_group}:{task_id} ep={episode_idx + 1}/{cfg.eval.n_episodes}",
                         disable=disable_progress,
-                        leave=False,
                     )
                     policy.reset()
                     episode_error = ""
                     if experiment_monitor is not None:
-                        experiment_monitor.reset(f"{task_group}:{task_id}", cfg.seed + total_episodes)
+                        experiment_monitor.reset(f"{task_group}:{task_id}", cfg.seed + episode_idx)
                     try:
-                        seed = cfg.seed + total_episodes if cfg.seed is not None else None
+                        seed = cfg.seed + episode_idx if cfg.seed is not None else None
                         reset_seed = [seed] if seed is not None else None
                         observation, _info = env.reset(seed=reset_seed)
                         observation_baseline = None
@@ -1481,7 +1479,8 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                 if pace_controller is not None:
                                     dispatch_steps, pace_event = pace_controller.select(
                                         task_description,
-                                        raw_action_chunk[0, :, :].detach().to("cpu", dtype=torch.float32).numpy(),
+                                        postprocessor(action_chunk.clone())[0].detach().to("cpu", dtype=torch.float32).numpy(),
+                                        max_horizon=action_queue_fill_steps,
                                     )
                                     logging.info(
                                         "[PACE] task=%s:%d ep=%d t_env=%d horizon=%d reason=%s threshold=%.6f",
@@ -1708,18 +1707,17 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                                 t_env_values_baseline.append(int(t_env))
 
                             t_env += 1
-                            step_prog.update(1)
                             if not disable_progress:
                                 running_success_rate = (
                                     100.0 * float(total_successes + (1 if success else 0)) / float(max(1, total_episodes + 1))
                                 )
                                 step_prog.set_postfix(
                                     {
-                                        "running_success_rate": f"{running_success_rate:.1f}%",
-                                        "infer_req": int(action_chunk_infer_requests),
-                                        "meltdowns": int(sum(meltdown_flags)),
-                                    }
+                                        "ok": f"{running_success_rate:.0f}%",
+                                        "calls": int(action_chunk_infer_requests),
+                                    }, refresh=False,
                                 )
+                            step_prog.update(1)
                         except Exception as exc:
                             episode_error = str(exc)
                             logging.exception(
@@ -1764,7 +1762,7 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
 
                     suffix = "success" if success else "failure"
                     task_segment = _safe_slug(task_description)
-                    episode_tag = f"task{task_id:03d}_ep{episode_idx:03d}_{suffix}_{task_segment}"
+                    episode_tag = f"{_safe_slug(task_group)}_task{task_id:03d}_ep{episode_idx:03d}_{suffix}_{task_segment}"
 
                     summary_row = _make_episode_summary(
                         task_group=task_group,
@@ -1892,7 +1890,7 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
                         meltdown_flags_baseline = list(meltdown_flags)
                         t_env_values_baseline = list(t_env_values)
 
-                    vis_trim_steps_raw = max(0, int(safety_k))
+                    vis_trim_steps_raw = 0  # Save the complete rollout, including detector warm-up.
                     replay_images_vis_raw = replay_images[vis_trim_steps_raw:] if vis_trim_steps_raw > 0 else replay_images
                     replay_images_baseline_vis_raw = (
                         replay_images_baseline[vis_trim_steps_raw:] if vis_trim_steps_raw > 0 else replay_images_baseline
@@ -2737,7 +2735,8 @@ def eval_modified_detection(cfg: EvalModifiedDetectionConfig) -> None:
 def main() -> None:
     init_logging()
     register_third_party_plugins()
-    eval_modified_detection()
+    with logging_redirect_tqdm():
+        eval_modified_detection()
 
 
 if __name__ == "__main__":

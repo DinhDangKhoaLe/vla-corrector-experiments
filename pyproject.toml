@@ -66,10 +66,10 @@ dependencies = [
     "accelerate>=1.10.0,<2.0.0",
 
     # Core dependencies
-    "numpy>=2.0.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
+    "numpy>=1.26.4,<2.3.0", # NumPy 1.26 supports RoboTwin's MPLib native extension.
     "h5py>=3.10,<4.0", # Native RoboTwin/XPolicyLab HDF5 demonstration reader.
     "setuptools>=71.0.0,<81.0.0",
-    "cmake>=3.29.0.1,<4.2.0",
+    "cmake>=3.29.0.1,<4.0.0", # egl_probe's legacy build requires CMake 3.
     "packaging>=24.2,<26.0",
 
     "torch>=2.2.1,<2.11.0",
@@ -86,7 +86,7 @@ dependencies = [
     "wandb>=0.24.0,<0.25.0",
     "draccus==0.10.0", # TODO: Relax version constraint
     "gymnasium>=1.1.1,<2.0.0",
-    "rerun-sdk>=0.24.0,<0.27.0",
+    "rerun-sdk>=0.22.1,<0.27.0", # 0.22.1 is the NumPy 1.x compatible release.
 
     # Support dependencies
     "deepdiff>=7.0.1,<9.0.0",

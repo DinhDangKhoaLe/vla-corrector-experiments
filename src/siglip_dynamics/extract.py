@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from siglip_dynamics.visual_tokens import pool_square_token_grid
+from siglip_dynamics.local_parquet import LocalParquetDataset
 
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset  # lerobot>=0.8
@@ -250,30 +251,6 @@ def _restrict_lerobot_video_decode(ds: object, args: argparse.Namespace, logger:
     logger.info("Restricting LeRobot video decode to %s; skipping %s", sorted(selected), skipped)
 
 
-class LocalParquetDataset:
-    """Lightweight local parquet dataset adapter to avoid remote sync side effects."""
-
-    def __init__(self, dataset_path: str):
-        from datasets import load_dataset
-
-        root = Path(dataset_path)
-        data_dir = root / "data" if (root / "data").exists() else root
-        self._root = root
-        self._data_dir = data_dir
-        self._ds = load_dataset("parquet", data_dir=str(data_dir), split="train")
-
-    def __len__(self) -> int:
-        return len(self._ds)
-
-    def __getitem__(self, idx: int) -> dict:
-        item = dict(self._ds[idx])
-        # Convert PIL images to numpy arrays to match downstream preprocessing.
-        for k, v in list(item.items()):
-            if hasattr(v, "size") and hasattr(v, "mode"):
-                item[k] = np.asarray(v)
-        return item
-
-
 def _looks_like_local_parquet_tree(ds_path: Path) -> bool:
     if not ds_path.exists():
         return False
@@ -298,8 +275,18 @@ def _load_dataset(args: argparse.Namespace, logger: logging.Logger):
             "robotwin_tasks": list(task_names),
         }
 
-    # Prefer local parquet loading first to avoid implicit HF sync writing into source dataset dir.
-    if dataset_loader in ("auto", "parquet") and _looks_like_local_parquet_tree(ds_path):
+    # Video-backed LeRobot datasets keep images outside Parquet; the reader must
+    # resolve episode timestamps and decode the corresponding video frames.
+    info_path = ds_path / "meta" / "info.json"
+    video_backed = False
+    if info_path.is_file():
+        features = json.loads(info_path.read_text()).get("features", {})
+        video_backed = any(isinstance(f, dict) and f.get("dtype") == "video" for f in features.values())
+    if video_backed and dataset_loader == "parquet":
+        raise ValueError("Video-backed datasets require --dataset-loader=auto or lerobot to decode images")
+
+    # Embedded-image datasets can use local Parquet without remote sync.
+    if not video_backed and dataset_loader in ("auto", "parquet") and _looks_like_local_parquet_tree(ds_path):
         try:
             ds = LocalParquetDataset(args.dataset_path)
             logger.info(

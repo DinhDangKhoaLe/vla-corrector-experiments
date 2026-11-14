@@ -58,11 +58,15 @@ class UncertaintyTrainingTests(unittest.TestCase):
     def test_fixed_k_and_mode_isolation(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = uncertainty_config(Path(tmp))
-            for updates in ({"unknown_feature": True}, {"action_prefix": False}):
+            for updates in ({"unknown_feature": True},):
                 raw = cfg.to_dict()
                 raw["features"].update(updates)
                 with self.assertRaises(ValueError):
                     from_dict(raw)
+            # Legacy single-action checkpoints may disable prefix conditioning.
+            raw = cfg.to_dict()
+            raw["features"]["action_prefix"] = False
+            self.assertFalse(from_dict(raw).features.action_prefix)
             cfg.evaluation.n_action_steps = 1
             with self.assertRaisesRegex(ValueError, "Prefix horizons"):
                 cfg.validate()

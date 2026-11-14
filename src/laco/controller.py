@@ -36,8 +36,12 @@ class LACoController:
     def __init__(self, models: list[LatentJacobianModel], artifact: dict[str, Any], calibration: dict[str, Any], *,
                  device: torch.device, action_low: float = -1., action_high: float = 1., trust_region: float = .15,
                  regularization: float = .1, kappa: float = 1., correction_horizon: int = 2,
-                 max_failed_retries: int = 1, condition_limit: float = 1e4, use_uncertainty: bool = True):
+                 max_failed_retries: int = 1, condition_limit: float = 1e4, use_uncertainty: bool = False,
+                 intervention: str = "adjust"):
         if not models: raise ValueError("Need one or more models")
+        if intervention not in {"adjust", "replan"}:
+            raise ValueError("intervention must be adjust or replan")
+        self.intervention = intervention
         self.models, self.device = models, device
         self.lm, self.ls = np.asarray(artifact["latent_mean"]), np.asarray(artifact["latent_std"])
         self.am, self.ass = np.asarray(artifact["action_mean"]), np.asarray(artifact["action_std"])
@@ -107,6 +111,8 @@ class LACoController:
         if filtered <= self.threshold:
             self.nominal = self._rollout(observed)
             return Decision(Mode.CONTINUE, self.queue.copy(), error, filtered, 0., 0., 0., 0., "within_calibrated_normal_range", correction_success)
+        if self.intervention == "replan":
+            return self._replan(error, filtered, "error_triggered_replan", correction_success)
         if not len(self.queue): return self._replan(error, filtered, "anomaly_with_empty_queue", correction_success)
         # Error points from observed state toward the nominal state.  Solve in standardized action units.
         _bias, jacobians = self._components(observed); j = np.mean(jacobians, axis=0)

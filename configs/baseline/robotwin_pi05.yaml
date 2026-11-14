@@ -1,0 +1,17 @@
+training:
+  backend: legacy
+evaluation:
+  environment: robotwin
+  robotwin_corrector_enabled: false
+  robotwin_root: third_party/RoboTwin
+  robotwin_task_config: demo_clean
+  robotwin_tasks: adjust_bottle
+  # Export/conversion required: docs/robotwin_official.md.
+  policy: pretrained_weights/pi05_robotwin_official_compat
+  output: outputs/eval/baseline_robotwin_h50_seed1000
+  episodes: 20
+  seed: 1000
+  n_action_steps: 50
+  chunk_size: 50
+  guidance: false
+  save_video: false

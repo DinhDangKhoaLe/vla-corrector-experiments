@@ -1,0 +1,16 @@
+dataset:
+  source: datasets/robotwin
+  format: robotwin
+  action_key: state
+calibration:
+  artifact: outputs/pace/robotwin_decoded_v2.json
+  episodes_per_task: 50
+pace:
+  max_horizon: 50
+  signal: joint
+  arm_groups: [[0, 1, 2, 3, 4, 5], [7, 8, 9, 10, 11, 12]]
+  fps: 50.0
+  smooth_window: 11
+  polynomial_order: 3
+  min_separation: 10
+  percentile: 5.0

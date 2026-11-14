@@ -933,7 +933,10 @@ class PI05Policy(PreTrainedPolicy):
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        self.model.to(config.device)
+        # Empty-weight initialization defers materialization until the saved
+        # tensors have been assigned; moving meta parameters would fail here.
+        if not next(self.model.parameters()).is_meta:
+            self.model.to(config.device)
 
         self.reset()
 
@@ -976,9 +979,12 @@ class PI05Policy(PreTrainedPolicy):
                 **kwargs,
             )
 
-        # Initialize model without loading weights
-        # Check if dataset_stats were provided in kwargs
-        model = cls(config, **kwargs)
+        # Avoid allocating/initializing a full random VLA beside the checkpoint.
+        # Nonpersistent rotary buffers stay real so the final device move is safe.
+        from accelerate import init_empty_weights
+
+        with init_empty_weights(include_buffers=False):
+            model = cls(config, **kwargs)
 
         # Load state dict (expects keys with "model." prefix)
         try:
@@ -989,22 +995,20 @@ class PI05Policy(PreTrainedPolicy):
                 resolved_file = cached_file(
                     pretrained_name_or_path,
                     "model.safetensors",
-                    cache_dir=kwargs.get("cache_dir"),
-                    force_download=kwargs.get("force_download", False),
-                    resume_download=kwargs.get("resume_download"),
-                    proxies=kwargs.get("proxies"),
-                    token=kwargs.get("token"),
-                    revision=kwargs.get("revision"),
-                    local_files_only=kwargs.get("local_files_only", False),
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    resume_download=resume_download,
+                    proxies=proxies,
+                    token=token,
+                    revision=revision,
+                    local_files_only=local_files_only,
                 )
                 from safetensors.torch import load_file
 
                 original_state_dict = load_file(resolved_file)
                 print("✓ Loaded state dict from model.safetensors")
             except Exception as e:
-                print(f"Could not load state dict from remote files: {e}")
-                print("Returning model without loading pretrained weights")
-                return model
+                raise RuntimeError(f"Could not load pretrained PI05 weights from {pretrained_name_or_path}") from e
 
             # First, fix any key differences (see openpi model.py, _fix_pytorch_state_dict_keys)
             fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
@@ -1024,8 +1028,20 @@ class PI05Policy(PreTrainedPolicy):
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
 
+            # assign=True preserves checkpoint dtypes; retain the configured
+            # precision choices that the previous copy-based loader applied.
+            expected = model.state_dict()
+            for key, value in remapped_state_dict.items():
+                if key in expected and value.dtype != expected[key].dtype:
+                    remapped_state_dict[key] = value.to(dtype=expected[key].dtype)
+
             # Load the remapped state dict into the model
-            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict, assign=True)
+            unresolved = [name for name, value in model.named_parameters() if value.is_meta]
+            if unresolved:
+                raise RuntimeError(f"Checkpoint left uninitialized PI05 parameters: {unresolved[:5]}")
+            model.to(config.device)
+            model.eval()
 
             if missing_keys:
                 print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
@@ -1051,7 +1067,7 @@ class PI05Policy(PreTrainedPolicy):
                 print("All keys loaded successfully!")
 
         except Exception as e:
-            print(f"Warning: Could not load state dict: {e}")
+            raise RuntimeError(f"Failed to load pretrained PI05 policy from {pretrained_name_or_path}: {e}") from e
 
         return model
 

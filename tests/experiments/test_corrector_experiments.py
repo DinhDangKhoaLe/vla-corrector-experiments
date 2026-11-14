@@ -167,20 +167,15 @@ class RuntimeTests(unittest.TestCase):
 
 class ConfigurationTests(unittest.TestCase):
     def test_examples_and_cli_switches(self):
-        for name in ("baseline", "baseline_matched", "prefix", "uncertainty", "baseline_queue_matched"):
-            cfg = load_config(f"configs/corrector/{name}.yaml")
+        for name in ("metaworld", "libero"):
+            cfg = load_config(f"configs/corrector/{name}_original_pool64.yaml")
             args = eval_command(cfg, "evaluate", "resolved.yaml")
             self.assertIn("--compute_baseline_metrics=false", args)
-            if name == "baseline":
-                self.assertFalse(any("experiment_config" in arg or "experiment_mode" in arg for arg in args))
-                self.assertIn("siglip_dynamics.train", legacy_train_command(cfg))
-                self.assertIn("--train-loss-type=cosine", legacy_train_command(cfg))
-            else:
-                self.assertIn("--experiment_mode=evaluate", args)
-        cfg = resolve("configs/corrector/baseline_matched.yaml", ["features.action_prefix=true"])
-        self.assertTrue(cfg.features.action_prefix)
+            self.assertFalse(any("experiment_config" in arg or "experiment_mode" in arg for arg in args))
+            self.assertIn("siglip_dynamics.train", legacy_train_command(cfg))
+            self.assertIn("--train-loss-type=cosine", legacy_train_command(cfg))
         with self.assertRaisesRegex(ValueError, "Legacy mode"):
-            resolve("configs/corrector/baseline.yaml", ["features.action_prefix=true"])
+            resolve("configs/corrector/metaworld_original_pool64.yaml", ["features.action_prefix=true"])
         with self.assertRaises(ValueError):
             from_dict({"features": {"prefix": True}})
         with self.assertRaises(ValueError):

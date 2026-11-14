@@ -60,10 +60,10 @@ def eval_command(cfg, mode, resolved_path):
         "policy.path": ev.policy,
         "policy.device": cfg.training.device, "policy.n_action_steps": ev.n_action_steps,
         "policy.chunk_size": ev.chunk_size, "policy.compile_model": False,
-        "env.type": "metaworld", "env.task": ev.tasks, "env.episode_length": ev.episode_length,
+        "env.type": ev.environment, "env.task": ev.tasks, "env.episode_length": ev.episode_length,
         "env.max_parallel_tasks": 1, "eval.batch_size": 1, "eval.n_episodes": ev.episodes,
         "eval.use_async_envs": False, "seed": seed, "output_dir": output,
-        "rename_map": {"observation.image": "observation.images.base_0_rgb"},
+        "rename_map": ev.rename_map,
         "safety_model_path": checkpoint, "safety_k": max(cfg.model.horizons), "safety_history_frames": 1,
         "experiment_config": str(resolved_path), "experiment_mode": mode,
         "guidance_eta": ev.guidance_eta, "guidance_apply_every": ev.guidance_apply_every,
@@ -78,6 +78,8 @@ def eval_command(cfg, mode, resolved_path):
         "save_episode_step_csv": True, "save_guidance_event_csv": True,
         "save_episode_npz": True, "save_summary_csv": True, "save_summary_json": True,
     }
+    if ev.episode_length is None:
+        args.pop("env.episode_length")  # LIBERO uses the same suite limits as baseline/PACE.
     for name, value in ev.thresholds.items():
         if not name.startswith("threshold_"):
             raise ValueError(f"Only threshold_* keys allowed in evaluation.thresholds: {name}")
@@ -94,6 +96,8 @@ def eval_command(cfg, mode, resolved_path):
 
 def _is_robotwin_cache(cfg) -> bool:
     """Whether the selected latent cache was extracted from native RoboTwin data."""
+    if cfg.evaluation.environment == "robotwin":
+        return True
     metadata_path = Path(cfg.training.cache) / "metadata.json"
     if not metadata_path.is_file():
         return False
@@ -153,7 +157,7 @@ def main():
             # RoboTwin is not a Gym/MuJoCo environment. Keep its SAPIEN task lifecycle,
             # three-camera observations and 14-D qpos actions in a dedicated runner.
             from .robotwin_eval import evaluate_robotwin
-            evaluate_robotwin(cfg, mode=mode, config_path=Path(args.config))
+            evaluate_robotwin(cfg, mode=args.mode, config_path=Path(args.config))
             return
         suffix = "_calibration" if args.mode == "collect-calibration" else ""
         if cfg.model.image_token_grid_size or cfg.model.image_token_grid_shape:

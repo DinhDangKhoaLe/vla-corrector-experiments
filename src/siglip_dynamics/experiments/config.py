@@ -65,6 +65,8 @@ class Uncertainty:
 
 @dataclass
 class Evaluation:
+    environment: str = "metaworld"
+    rename_map: dict[str, str] = field(default_factory=lambda: {"observation.image": "observation.images.base_0_rgb"})
     policy: str = "pretrained_weights/pi05_metaworld_compat"
     checkpoint: str = ""  # Empty means training.output/best_model.pt.
     output: str = "outputs/experiments/eval_baseline"
@@ -72,7 +74,7 @@ class Evaluation:
     episodes: int = 5
     seed: int = 1000
     collection_seed: int = 2000
-    episode_length: int = 300
+    episode_length: int | None = 300
     n_action_steps: int = 10
     chunk_size: int = 50
     guidance: bool = True
@@ -87,6 +89,8 @@ class Evaluation:
     robotwin_task_config: str = "demo_clean"
     robotwin_tasks: str = ""
     robotwin_expert_check: bool = True
+    robotwin_corrector_enabled: bool = True
+    pace_config: str = ""
     # Runtime overrides of the original median/MAD state machine.
     thresholds: dict[str, Any] = field(default_factory=dict)
 
@@ -125,7 +129,10 @@ class Experiment:
         if min(tr.epochs, tr.batch_size, tr.microbatch_size, tr.patience) < 1 or tr.lr <= 0:
             raise ValueError("Invalid training schedule")
         ev = self.evaluation
-        if not 1 <= ev.n_action_steps <= ev.chunk_size or ev.episode_length < 1 or ev.episodes < 1:
+        if ev.environment not in {"metaworld", "libero", "robotwin"}:
+            raise ValueError("evaluation.environment must be metaworld/libero/robotwin")
+        if (not 1 <= ev.n_action_steps <= ev.chunk_size or ev.episodes < 1
+                or (ev.episode_length is not None and ev.episode_length < 1)):
             raise ValueError("Invalid evaluation horizon, episode length or episode count")
         if max(h) > ev.n_action_steps and self.features.action_prefix:
             raise ValueError("Prefix horizons cannot exceed evaluation.n_action_steps")

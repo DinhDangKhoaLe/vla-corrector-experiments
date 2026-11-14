@@ -208,7 +208,12 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
         # This is very ugly, ideally we'd like to be able to do that natively with draccus
         # something like --policy.path (in addition to --policy.type)
         with draccus.config_type("json"):
-            orig_config = draccus.parse(cls, config_file, args=[])
+            # Concrete policy classes must parse without the registry discriminator.
+            # Abstract callers still need `type` to select the correct subclass.
+            if cls is PreTrainedConfig:
+                orig_config = draccus.parse(cls, config_file, args=[])
+            else:
+                orig_config = None
 
         if config_file is None:
             raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
@@ -226,4 +231,5 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
 
         cli_overrides = policy_kwargs.pop("cli_overrides", [])
         with draccus.config_type("json"):
-            return draccus.parse(orig_config.__class__, config_file, args=cli_overrides)
+            return draccus.parse(orig_config.__class__ if orig_config is not None else cls,
+                                 config_file, args=cli_overrides)

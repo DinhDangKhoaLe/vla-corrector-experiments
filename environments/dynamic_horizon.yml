@@ -1,0 +1,17 @@
+name: dynamic_horizon
+channels:
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - ffmpeg=7
+  - cmake>=3.29,<4
+  - ninja
+  - pkg-config
+  - cxx-compiler
+  - cuda-toolkit=12.6
+  - libegl
+  - libgl
+  - libglib
+  - vulkan-loader
